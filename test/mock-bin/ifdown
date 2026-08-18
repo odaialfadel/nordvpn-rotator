@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "ifdown $*" >> "$NVR_TEST_DIR/actions.log"

@@ -1,0 +1,18 @@
+#!/bin/sh
+# mock uci — state lives in $NVR_TEST_DIR/uci.env as KEY=VALUE lines
+STATE="$NVR_TEST_DIR/uci.env"
+[ "$1" = "-q" ] && shift
+case "$1" in
+get)
+    line=$(grep "^$2=" "$STATE" 2>/dev/null | head -1)
+    [ -n "$line" ] || exit 1
+    echo "${line#*=}" ;;
+set)
+    key="${2%%=*}"
+    grep -v "^$key=" "$STATE" 2>/dev/null > "$STATE.tmp"
+    echo "$2" >> "$STATE.tmp"
+    mv "$STATE.tmp" "$STATE"
+    echo "uci set $2" >> "$NVR_TEST_DIR/actions.log" ;;
+commit)
+    echo "uci commit $2" >> "$NVR_TEST_DIR/actions.log" ;;
+esac

@@ -1,0 +1,14 @@
+#!/bin/sh
+# opkg prerm — runs on the router before the files are removed.
+# Stops cron from firing the script mid-removal.
+[ -n "$IPKG_INSTROOT" ] && exit 0
+
+CRONTAB=/etc/crontabs/root
+# grep -v exits 1 when nothing is left — an empty crontab is still the
+# correct result, so never condition the mv on grep's exit code
+if [ -f "$CRONTAB" ]; then
+    grep -v "nordvpn-rotate" "$CRONTAB" > "$CRONTAB.tmp"
+    mv "$CRONTAB.tmp" "$CRONTAB"
+    /etc/init.d/cron restart 2>/dev/null
+fi
+exit 0

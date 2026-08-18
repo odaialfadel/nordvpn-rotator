@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "ifup $*" >> "$NVR_TEST_DIR/actions.log"

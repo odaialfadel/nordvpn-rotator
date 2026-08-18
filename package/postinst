@@ -1,0 +1,29 @@
+#!/bin/sh
+# opkg postinst — runs on the router after the files are unpacked.
+# Same runtime setup install.sh performs: cron lines, cron service,
+# sysupgrade.conf registration. Idempotent.
+[ -n "$IPKG_INSTROOT" ] && exit 0
+
+BIN=/usr/bin/nordvpn-rotate.sh
+CONF=/etc/nordvpn-rotate.conf
+DASH=/www/cgi-bin/rotator
+CRONTAB=/etc/crontabs/root
+
+touch "$CRONTAB"
+grep -qF "$BIN run" "$CRONTAB" || echo "*/30 * * * * $BIN run" >> "$CRONTAB"
+grep -qF "$BIN nightly" "$CRONTAB" || echo "30 4 * * * $BIN nightly" >> "$CRONTAB"
+/etc/init.d/cron enable 2>/dev/null
+/etc/init.d/cron restart 2>/dev/null
+
+touch /etc/sysupgrade.conf
+for p in "$BIN" "$CONF" "$CRONTAB" "$DASH"; do
+    grep -qxF "$p" /etc/sysupgrade.conf || echo "$p" >> /etc/sysupgrade.conf
+done
+if [ -s /etc/rotator-dash.secret ]; then
+    grep -qxF "/etc/rotator-dash.secret" /etc/sysupgrade.conf \
+        || echo "/etc/rotator-dash.secret" >> /etc/sysupgrade.conf
+fi
+
+echo "nordvpn-rotate installed (DRY_RUN=1 — log-only until you edit $CONF)"
+echo "next: $BIN check   (read-only verification)"
+exit 0

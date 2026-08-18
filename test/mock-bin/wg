@@ -1,0 +1,16 @@
+#!/bin/sh
+# mock wg: `show <if> latest-handshakes` and `show <if> endpoints`
+case "$3" in
+endpoints)
+    if [ -f "$NVR_TEST_DIR/live_ep" ]; then
+        printf 'MOCKPUBKEY\t%s\n' "$(cat "$NVR_TEST_DIR/live_ep")"
+    else
+        printf 'MOCKPUBKEY\t(none)\n'
+    fi ;;
+latest-handshakes|*)
+    if [ "$(cat "$NVR_TEST_DIR/health" 2>/dev/null)" = "fail" ]; then
+        printf 'MOCKPUBKEY\t0\n'
+    else
+        printf 'MOCKPUBKEY\t%s\n' "$(date +%s)"
+    fi ;;
+esac

@@ -1,0 +1,10 @@
+# generated test artifacts
+test/tmp/
+
+# build output — attach .ipk files to GitHub Releases instead
+dist/
+
+# personal ops docs and diagrams, not part of the public repo
+RUNBOOK.md
+ONBOARDING.md
+nordvpn-rotator.drawio

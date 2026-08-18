@@ -1,0 +1,17 @@
+#!/bin/sh
+# opkg postrm — runs on the router after the files are removed.
+# Cleans state + sysupgrade.conf entries. /etc/crontabs/root is left in
+# sysupgrade.conf on purpose (harmless, and other cron jobs may live there).
+# A user-modified /etc/nordvpn-rotate.conf is preserved by opkg (conffile).
+[ -n "$IPKG_INSTROOT" ] && exit 0
+
+if [ -f /etc/sysupgrade.conf ]; then
+    grep -v -E 'nordvpn-rotate|cgi-bin/rotator|rotator-dash' /etc/sysupgrade.conf > /tmp/su.tmp
+    mv /tmp/su.tmp /etc/sysupgrade.conf
+fi
+rm -f /etc/nordvpn-rotate.prev /etc/rotator-dash.secret
+rm -rf /tmp/nordvpn-rotate /tmp/nordvpn-rotate.log
+
+echo "nordvpn-rotate removed. The WireGuard peer keeps whatever endpoint it had"
+echo "last — pick a server in the GL panel if you want a specific one back."
+exit 0

@@ -1,0 +1,7 @@
+#!/bin/sh
+echo "ping $*" >> "$NVR_TEST_DIR/actions.log"
+[ "$(cat "$NVR_TEST_DIR/health" 2>/dev/null)" = "fail" ] && exit 1
+# emulate BusyBox ping output so the latency probe can parse an RTT
+for last; do :; done
+echo "64 bytes from $last: seq=0 ttl=57 time=23.4 ms"
+exit 0
