@@ -27,6 +27,16 @@ done
 [ -n "$PY" ] || { echo "need python 3 on PATH (tried python3, python)"; exit 1; }
 export NVR_PYTHON="$PY"
 
+# The mocks are found through PATH, so a lost executable bit turns every single
+# check into a failure with no hint why. Windows filesystems report everything
+# as executable, so this only ever bites on Linux — say so once, up front.
+for m in uci ubus jsonfilter ping wg ifup ifdown logger sleep; do
+    [ -x "$ROOT/test/mock-bin/$m" ] && continue
+    echo "test/mock-bin/$m is not executable — the mocks are run through PATH."
+    echo "fix: git update-index --chmod=+x test/mock-bin/*"
+    exit 1
+done
+
 # file:// URL that Windows curl accepts
 if command -v cygpath >/dev/null 2>&1; then
     SAMPLE_URL="file:///$(cygpath -m "$SAMPLE")"
