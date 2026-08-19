@@ -254,7 +254,10 @@ cmd_run() {
             is_uint "$load" && CUR_LOAD="$load"
         fi
         if is_uint "$load" && [ -n "$station" ]; then
-            printf '%s %s %s %s\n' "$load" "$i" "$station" "$host" >> "$RANKF"
+            # zero-padded composite key: plain lexical sort then equals numeric
+            # (load, api-order) — BusyBox sort breaks -k2,2 numeric ties
+            # lexically, so `sort -n -k1,1 -k2,2` is NOT portable here
+            printf '%03d%03d %s %s %s %s\n' "$load" "$i" "$load" "$i" "$station" "$host" >> "$RANKF"
         fi
         i=$((i + 1))
     done
@@ -262,9 +265,9 @@ cmd_run() {
 
     # order by load, ties keep NordVPN's order — the dashboard sorts the same
     # way, so the engine's pick is always one of the rows the user is looking at
-    sort -n -k1,1 -k2,2 "$RANKF" > "$RANKF.sorted"
+    sort "$RANKF" > "$RANKF.sorted"
     if [ -n "$CUR_IDX" ]; then
-        CUR_RANK=$(awk -v idx="$CUR_IDX" '$2 == idx { print NR; exit }' "$RANKF.sorted")
+        CUR_RANK=$(awk -v idx="$CUR_IDX" '$3 == idx { print NR; exit }' "$RANKF.sorted")
     fi
 
     # pass 2 — pick the lowest-load candidate within the top $CANDIDATES,
@@ -272,7 +275,7 @@ cmd_run() {
     # too — never switch onto half-parsed data
     BEST_HOST=""; BEST_LOAD=""; BEST_STATION=""; BEST_PUB=""; BEST_LOC=""
     r=0
-    while read -r load idx station host; do
+    while read -r skey load idx station host; do
         r=$((r + 1))
         [ "$r" -le "$CANDIDATES" ] || break
         [ "$idx" = "$CUR_IDX" ] && continue

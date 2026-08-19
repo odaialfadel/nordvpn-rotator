@@ -166,13 +166,16 @@ if [ -f "$RECO" ]; then
         load=$(jf "@[$i].load"); station=$(jf "@[$i].station")
         if [ "$station" = "$CUR_IP" ] || [ "$host" = "$CFG_HOST" ]; then CUR_IDX="$i"; fi
         if is_uint "$load" && [ -n "$station" ]; then
-            printf '%s %s %s %s\n' "$load" "$i" "$station" "$host" >> "$RANKF"
+            # zero-padded composite key: plain lexical sort then equals numeric
+            # (load, api-order) — BusyBox sort breaks -k2,2 numeric ties
+            # lexically, so `sort -n -k1,1 -k2,2` is NOT portable here
+            printf '%03d%03d %s %s %s %s\n' "$load" "$i" "$load" "$i" "$station" "$host" >> "$RANKF"
         fi
         i=$((i + 1))
     done
-    sort -n -k1,1 -k2,2 "$RANKF" > "$RANKF.s"
+    sort "$RANKF" > "$RANKF.s"
     r=0
-    while read -r load idx station host; do
+    while read -r skey load idx station host; do
         r=$((r + 1))
         is_cur=0
         [ -n "$CUR_IDX" ] && [ "$idx" = "$CUR_IDX" ] && is_cur=1
