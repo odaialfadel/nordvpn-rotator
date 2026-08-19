@@ -1,0 +1,18 @@
+# The payload of this repo is POSIX shell that runs on an OpenWrt router.
+# A stray CR makes busybox ash fail with "syntax error: unexpected word"
+# before it executes a single line, so every text file is stored in git and
+# checked out with LF on every platform, Windows included.
+* text=auto eol=lf
+
+# binary, never line-ending filtered
+*.png binary
+*.ipk binary
+*.gz  binary
+
+# extensionless or unusual extensions, so tooling stops guessing
+rotator-dashboard.cgi text eol=lf diff=sh
+package/postinst      text eol=lf diff=sh
+package/prerm         text eol=lf diff=sh
+package/postrm        text eol=lf diff=sh
+package/conffiles     text eol=lf
+test/mock-bin/*       text eol=lf diff=sh

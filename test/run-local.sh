@@ -15,6 +15,18 @@ export PATH="$ROOT/test/mock-bin:$PATH"
 rm -rf "$NVR_TEST_DIR"
 mkdir -p "$NVR_TEST_DIR"
 
+# Git Bash calls it python, Ubuntu (and CI) only has python3, and Windows ships
+# a python3 stub that prints "not found" and still exits 0 — so probe by output,
+# never by exit status. mock-bin/jsonfilter reuses the answer via NVR_PYTHON.
+PY=""
+for cand in python3 python; do
+    command -v "$cand" >/dev/null 2>&1 || continue
+    [ "$("$cand" -c 'import sys; print(sys.version_info[0])' 2>/dev/null)" = "3" ] || continue
+    PY="$cand"; break
+done
+[ -n "$PY" ] || { echo "need python 3 on PATH (tried python3, python)"; exit 1; }
+export NVR_PYTHON="$PY"
+
 # file:// URL that Windows curl accepts
 if command -v cygpath >/dev/null 2>&1; then
     SAMPLE_URL="file:///$(cygpath -m "$SAMPLE")"
@@ -27,7 +39,7 @@ else
 fi
 
 # derived fixtures: current-server-is-hot, and everything-is-hot
-python - "$SAMPLE" "$NVR_TEST_DIR" <<'PYEOF'
+"$PY" - "$SAMPLE" "$NVR_TEST_DIR" <<'PYEOF'
 import json, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
 hot = json.loads(json.dumps(d)); hot[0]["load"] = 85
@@ -182,7 +194,7 @@ sh "$SCRIPT" run
 check "falls back to config host + would normalize" "DRY-RUN: would switch frankfurt.de.wg.nordhold.net" "$LOG"
 
 echo "=== 11. best candidate missing its public key -> skipped, next candidate used"
-python - "$SAMPLE" "$NVR_TEST_DIR" <<'PYEOF'
+"$PY" - "$SAMPLE" "$NVR_TEST_DIR" <<'PYEOF'
 import json, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
 broken = json.loads(json.dumps(d))

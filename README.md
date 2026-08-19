@@ -3,6 +3,12 @@
 A small shell script and dashboard that keep a GL.iNet router on a fast
 NordVPN server, instead of the one it happened to pick last month.
 
+[![ci](https://github.com/odaialfadel/nordvpn-rotator/actions/workflows/ci.yml/badge.svg)](https://github.com/odaialfadel/nordvpn-rotator/actions/workflows/ci.yml)
+[![latest release](https://img.shields.io/github/v/release/odaialfadel/nordvpn-rotator?label=release)](https://github.com/odaialfadel/nordvpn-rotator/releases/latest)
+
+Installs as an opkg package, so it shows up in the GL panel's Plug-ins list —
+one line over ssh, or a `.ipk` you can inspect first. [Install](#install).
+
 | Dark | Light |
 |------|-------|
 | ![dashboard, dark](docs/dashboard-dark.png) | ![dashboard, light](docs/dashboard-light.png) |
@@ -62,7 +68,10 @@ nothing until you deliberately arm it.
   set up and working in the GL panel. Built and tested on an XE3000
   (firmware 4.8.3); anything with the same `uci`/`ubus`/`jsonfilter` layout
   should behave.
-- Nothing else. It uses only tools that ship with the stock firmware.
+- Nothing else. It uses only tools that ship with the stock firmware —
+  `curl`, `jsonfilter`, `uci` and `ubus`, which the package declares as
+  dependencies so opkg refuses to install onto a router that is missing one.
+  `wg` is optional: without it the health check falls back to ping.
 
 One gotcha I hit: on the XE3000 the WireGuard client interface is
 `wgclient1`, not the `wgclient` most forum posts mention. That's what the
@@ -70,20 +79,89 @@ One gotcha I hit: on the XE3000 the WireGuard client interface is
 
 ## Install
 
-Upload the four files and run the installer on the router:
+It ships as an opkg package, so the router treats it like any other plug-in: it
+appears in the GL.iNet panel's **Plug-ins** list, and `opkg remove` takes it
+away again, cron lines included. Pick whichever route suits you — they install
+exactly the same files.
+
+### One line over ssh
+
+```bash
+ssh root@192.168.8.1 'curl -fsSL https://raw.githubusercontent.com/odaialfadel/nordvpn-rotator/main/install-remote.sh | sh'
+```
+
+That looks up the latest release, checks the `.ipk` against the `sha256sums`
+published with it, and only then hands the file to `opkg`. Nothing is needed on
+your PC. Append a tag to pin a version rather than taking the newest:
+
+```bash
+ssh root@192.168.8.1 'curl -fsSL https://raw.githubusercontent.com/odaialfadel/nordvpn-rotator/main/install-remote.sh | sh -s v0.2.0'
+```
+
+### A downloaded .ipk
+
+Take `nordvpn-rotate_<version>_all.ipk` from
+[Releases](https://github.com/odaialfadel/nordvpn-rotator/releases):
+
+```bash
+scp -O nordvpn-rotate_*_all.ipk root@192.168.8.1:/tmp/
+```
+
+```bash
+ssh root@192.168.8.1 "opkg install /tmp/nordvpn-rotate_*_all.ipk"
+```
+
+### As an opkg feed
+
+If you would rather install it by name and pick up later versions with
+`opkg upgrade`, point opkg at the releases — that URL always resolves to the
+newest one:
+
+```bash
+echo 'src/gz nordvpn_rotator https://github.com/odaialfadel/nordvpn-rotator/releases/latest/download' >> /etc/opkg/customfeeds.conf
+```
+
+Stock firmware sets `option check_signature` in `/etc/opkg.conf` and this feed
+is not usign-signed, so `opkg update` refuses it until that line is commented
+out:
+
+```bash
+sed -i 's/^option check_signature/# option check_signature/' /etc/opkg.conf
+opkg update && opkg install nordvpn-rotate
+```
+
+Be aware that switch is global: it lowers the bar for *every* feed on the
+router, the official ones included. The two routes above need no such change —
+they verify the download by SHA256 before installing — so this one is really
+for people who already run their own feeds.
+
+### The old way, loose files
+
+Still supported, and still what `install.sh` is for:
 
 ```bash
 scp -O nordvpn-rotate.sh nordvpn-rotate.conf rotator-dashboard.cgi install.sh root@192.168.8.1:/tmp/nvr/
 ```
 
 ```bash
-ssh root@192.168.8.1 "sh /tmp/nvr/install.sh && /usr/bin/nordvpn-rotate.sh check"
+ssh root@192.168.8.1 "sh /tmp/nvr/install.sh"
 ```
 
-`check` is a read-only pre-flight that verifies every assumption on your
-router (tools present, interface up, peer section found, API reachable) and
-prints OK/WARN/FAIL for each. Nothing is switched yet — the shipped config
-has `DRY_RUN=1`.
+`install.sh` does the same runtime setup as the package (cron lines,
+`/etc/sysupgrade.conf` entries), but opkg knows nothing about the files, so
+they will not show up under Plug-ins and `opkg remove` will not find them.
+Reverse it with `sh /tmp/nvr/install.sh uninstall`.
+
+### Then, whichever route you took
+
+```bash
+ssh root@192.168.8.1 "/usr/bin/nordvpn-rotate.sh check"
+```
+
+`check` is a read-only pre-flight that verifies every assumption on your router
+(tools present, interface up, peer section found, API reachable) and prints
+OK/WARN/FAIL for each. Nothing is switched yet — the shipped config has
+`DRY_RUN=1`.
 
 Now let it run for a couple of days and read its diary:
 
@@ -91,9 +169,15 @@ Now let it run for a couple of days and read its diary:
 ssh root@192.168.8.1 "tail -f /tmp/nordvpn-rotate.log"
 ```
 
-Lines like `OK: de1478... load 23% (rank 2 of 20)` mean it's happy. Lines
-like `DRY-RUN: would switch ...` show what it would have done and why. When
-those decisions look sensible to you, arm it.
+Lines like `OK: de1478... load 23% (rank 2 of 20)` mean it's happy. Lines like
+`DRY-RUN: would switch ...` show what it would have done and why. When those
+decisions look sensible to you, arm it.
+
+### Updating
+
+Re-run the one-liner, or `opkg install --force-reinstall` a newer `.ipk`. Your
+`/etc/nordvpn-rotate.conf` survives either way — it is a declared conffile, so
+opkg leaves an edited one alone.
 
 ## Going live
 
@@ -164,28 +248,82 @@ rollback, and it respects dry-run.
 
 ## Testing
 
+Three suites, none of which need a router.
+
 `test/run-local.sh` runs the real scripts on a normal PC with every router
 command mocked (`uci`, `ubus`, `wg`, `ping`, ...) — 74 checks covering the
 switch logic, rollback, recovery after interrupted switches, the dashboard
-rendering, and the dashboard's auth. It runs fine in Git Bash on Windows;
-you need `python` and `openssl` on the PATH.
+rendering, and the dashboard's auth. It runs in Git Bash on Windows and on
+Linux; you need Python 3 and `openssl` on the PATH.
 
 ```bash
 sh test/run-local.sh
 ```
 
-If you want a proper package instead of loose files, `package/build-ipk.sh`
-builds an opkg-installable `.ipk`.
+`test/test-package.sh` builds the `.ipk` and the feed and picks both apart —
+51 checks on the archive envelope, the control metadata, file modes, and the
+feed index arithmetic (every `Size`, `SHA256sum` and `Installed-Size` is
+recomputed and compared). No root, no router, works on Windows.
+
+```bash
+sh test/test-package.sh
+```
+
+`test/test-openwrt.sh` is the one that actually proves the package: it unpacks
+a real OpenWrt rootfs, chroots in, and drives the **real `opkg` binary**
+through install, reinstall, conffile preservation and removal, then through a
+served feed, then through `install-remote.sh` against a mock GitHub release —
+including a tampered download that has to be refused. It also runs
+`nordvpn-rotate.sh check` under real busybox ash, which is the shell Git Bash
+cannot imitate and the one that rejects bashisms. Linux and root only.
+
+```bash
+sudo sh test/test-openwrt.sh
+```
+
+CI runs all three on every push, against OpenWrt 21.02.7 and 23.05.5 — the two
+bases GL.iNet 4.x firmware is built on.
+
+## Building the package yourself
+
+```bash
+sh package/build-ipk.sh        # -> dist/nordvpn-rotate_<version>_all.ipk
+sh package/build-feed.sh       # -> dist/feed/{Packages,Packages.gz,*.ipk}
+```
+
+Both need nothing but tar, gzip and coreutils, so Git Bash on Windows is
+enough. There is no cross-compiling and no OpenWrt SDK involved: everything in
+the package is shell, so it is `Architecture: all` and installs on any
+opkg-based firmware. The version comes from `VERSION=` in `nordvpn-rotate.sh`,
+and a release is refused if the git tag disagrees with it.
+
+If you want the feed to work without editing `/etc/opkg.conf` on every router,
+sign it with your own usign key and install the public half into
+`/etc/opkg/keys/` on the routers:
+
+```bash
+usign -G -s nvr.sec -p nvr.pub
+NVR_USIGN_KEY=nvr.sec sh package/build-feed.sh
+```
 
 ## Uninstall
+
+If you installed the package:
+
+```bash
+ssh root@192.168.8.1 "opkg remove nordvpn-rotate"
+```
+
+or use the Plug-ins list in the GL panel. If you installed loose files with
+`install.sh`:
 
 ```bash
 ssh root@192.168.8.1 "sh /tmp/nvr/install.sh uninstall"
 ```
 
-Removes the script, conf, cron lines, dashboard and state. The WireGuard
-peer keeps whatever endpoint it had last; pick a server in the GL panel if
-you want a specific one back.
+Either way it removes the script, conf, cron lines, dashboard and state. The
+WireGuard peer keeps whatever endpoint it had last; pick a server in the GL
+panel if you want a specific one back.
 
 ## Fine print
 
@@ -193,9 +331,14 @@ you want a specific one back.
   parties. If NordVPN changes the format, the script refuses to act rather
   than guessing (it parses defensively and dies loudly).
 - GL.iNet firmware upgrades tend to wipe `/usr/bin` extras and the crontab.
-  The installer registers everything in `/etc/sysupgrade.conf`, but GL
-  doesn't guarantee honoring it — keep the files around and re-run
-  `install.sh` after an upgrade.
+  Both the package's postinst and `install.sh` register everything in
+  `/etc/sysupgrade.conf`, but GL doesn't guarantee honoring it — re-run the
+  install after a firmware upgrade and check `opkg list-installed | grep
+  nordvpn`.
+- The package is `Architecture: all` — it is shell, so there is nothing
+  compiled to match against your router's CPU. Tested against OpenWrt 21.02
+  and 23.05 userspace, which is what GL.iNet 4.x is built on. OpenWrt 24.10+
+  replaced opkg with apk and is not covered.
 - All German NordVPN servers currently share one WireGuard public key, so a
   switch is just an endpoint change. The script still updates the key when
   it differs, so other countries should work too.

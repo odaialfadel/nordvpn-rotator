@@ -30,11 +30,18 @@ sed 's/\r$//' "$ROOT/nordvpn-rotate.conf"   > "$BUILD/data/etc/nordvpn-rotate.co
 sed 's/\r$//' "$ROOT/rotator-dashboard.cgi" > "$BUILD/data/www/cgi-bin/rotator"
 
 # control + maintainer scripts (also stripped)
+# Depends lists the four stock packages the script genuinely cannot work
+# without; all four are part of every OpenWrt/GL.iNet 4.x base image and are
+# recorded in opkg's status file, so this resolves without a feed configured.
+# wireguard-tools (wg) is deliberately absent — without it the health check
+# falls back to ping and the rotator still works.
 cat > "$BUILD/control/control" <<EOF
 Package: $PKG
 Version: $VER-$REV
+Depends: curl, jsonfilter, uci, ubus
 Architecture: all
 Maintainer: Odai Al Fadel
+License: MIT
 Section: net
 Priority: optional
 Description: Load-threshold NordVPN WireGuard server rotation for GL.iNet 4.x.

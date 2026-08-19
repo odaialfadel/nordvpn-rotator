@@ -1,0 +1,123 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "existing tag to (re)build the release for, e.g. v0.2.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: resolve the tag
+        id: tag
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          [ -n "$TAG" ] || TAG="${GITHUB_REF#refs/tags/}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: the tag must match VERSION in nordvpn-rotate.sh
+        run: |
+          # Otherwise the release is called v0.3.0 while every router that
+          # installs it reports 0.2.0, and the .ipk filename disagrees too.
+          FILE=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' nordvpn-rotate.sh)
+          WANT="${{ steps.tag.outputs.version }}"
+          if [ "$FILE" != "$WANT" ]; then
+            echo "tag ${{ steps.tag.outputs.tag }} implies $WANT, but nordvpn-rotate.sh says VERSION=\"$FILE\"" >&2
+            exit 1
+          fi
+          echo "version $FILE"
+
+      - name: test before shipping
+        run: |
+          sh test/run-local.sh
+          sh test/test-package.sh
+          sudo -E sh test/test-openwrt.sh
+
+      - name: build the package and the feed
+        run: |
+          sh package/build-ipk.sh
+          sh package/build-feed.sh
+
+      - name: assemble the release assets
+        run: |
+          VER="${{ steps.tag.outputs.version }}"
+          mkdir -p out
+          cp dist/nordvpn-rotate_*_all.ipk out/
+          # Packages/Packages.gz make the release itself usable as an opkg feed:
+          #   src/gz nordvpn https://github.com/OWNER/REPO/releases/latest/download
+          cp dist/feed/Packages dist/feed/Packages.gz out/
+
+          # the loose-files route, for people who prefer scp over opkg
+          mkdir -p "nordvpn-rotate-$VER"
+          cp nordvpn-rotate.sh nordvpn-rotate.conf rotator-dashboard.cgi \
+             install.sh install-remote.sh LICENSE README.md "nordvpn-rotate-$VER/"
+          tar czf "out/nordvpn-rotate-$VER.tar.gz" "nordvpn-rotate-$VER"
+
+          # sha256sums covers every other asset; install-remote.sh checks the
+          # .ipk against it before letting opkg near the file
+          ( cd out && ls | grep -v '^sha256sums$' | xargs sha256sum > sha256sums )
+          cat out/sha256sums
+
+      - name: release notes
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          IPK=$(cd out && ls nordvpn-rotate_*_all.ipk)
+          {
+            # everything under this tag's CHANGELOG heading, up to the next one
+            if [ -f CHANGELOG.md ]; then
+              awk -v t="## $TAG" '
+                $0 ~ "^"t {f=1; next}
+                f && /^## / {exit}
+                f {print}
+              ' CHANGELOG.md
+            fi
+            cat <<EOF
+
+          ## Install on the router
+
+          One line over ssh — resolves this release, verifies the SHA256, hands it to opkg:
+
+          \`\`\`sh
+          wget -qO- https://raw.githubusercontent.com/${{ github.repository }}/main/install-remote.sh | sh
+          \`\`\`
+
+          Or download \`$IPK\` and:
+
+          \`\`\`sh
+          opkg install /tmp/$IPK
+          nordvpn-rotate.sh check
+          \`\`\`
+
+          It installs in DRY_RUN=1 and only logs what it *would* do until you arm it.
+          \`sha256sums\` covers every asset on this release.
+          EOF
+          } > notes.md
+          cat notes.md
+
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/* --clobber
+            gh release edit "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" out/* \
+              --title "nordvpn-rotate $TAG" \
+              --notes-file notes.md
+          fi

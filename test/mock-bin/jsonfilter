@@ -1,2 +1,2 @@
 #!/bin/sh
-exec python "$(dirname "$0")/jsonfilter.py" "$@"
+exec "${NVR_PYTHON:-python}" "$(dirname "$0")/jsonfilter.py" "$@"

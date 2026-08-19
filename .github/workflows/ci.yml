@@ -1,0 +1,85 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  logic:
+    name: rotator logic (mocked router)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: run-local.sh
+        run: sh test/run-local.sh
+
+  package:
+    name: package structure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: test-package.sh
+        run: sh test/test-package.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ipk-${{ github.sha }}
+          path: dist/*.ipk
+          if-no-files-found: error
+
+  openwrt:
+    name: real opkg on OpenWrt ${{ matrix.version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 21.02 is what most GL.iNet 4.x firmware is built on; 23.05 is what the
+        # newer models ship. Both use opkg, so both must install this package.
+        version: ["21.02.7", "23.05.5"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: cache the OpenWrt rootfs
+        uses: actions/cache@v4
+        with:
+          path: /tmp/owrt-cache
+          key: owrt-rootfs-${{ matrix.version }}
+      - name: test-openwrt.sh
+        run: sudo -E OWRT_VERSION=${{ matrix.version }} sh test/test-openwrt.sh
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck (errors only)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y shellcheck
+          # -S error keeps this a gate on real breakage, not on style. The CGI
+          # and the rotator are long-lived shell with plenty of intentional
+          # word-splitting; style warnings there are noise, a syntax or
+          # always-false test is not.
+          shellcheck -s sh -S error \
+            nordvpn-rotate.sh install.sh install-remote.sh rotator-dashboard.cgi \
+            package/build-ipk.sh package/build-feed.sh \
+            package/postinst package/prerm package/postrm
+
+  crlf:
+    name: no CRLF in tracked text
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: reject stray carriage returns
+        run: |
+          # A CR in any of these makes busybox ash fail before it runs a line.
+          bad=$(git grep -Il $'\r' -- \
+            '*.sh' '*.cgi' '*.conf' 'package/*' 'test/mock-bin/*' || true)
+          if [ -n "$bad" ]; then
+            echo "CRLF found in:"; echo "$bad"
+            echo "fix: git add --renormalize . (see .gitattributes)"
+            exit 1
+          fi
+          echo "clean"
