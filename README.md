@@ -116,12 +116,9 @@ press the buttons through your browser.)
 
 What you're looking at, top to bottom:
 
-- **Current server** — hostname, city, load, its rank in NordVPN's list,
-  round-trip time, handshake age, last switch.
-- **Decision** — a gauge with the current server, the best candidate, and
-  the switch line, plus one sentence saying exactly what the rotator will do
-  next and why. If it says "Holding", nothing moves. The **Force switch**
-  button lives here too.
+- **Current server** — hostname, city, load, its load rank, round-trip
+  time, handshake age, last switch — and the **Force switch** button for a
+  fresh IP on demand.
 - **Candidates** — NordVPN's recommendation pool **sorted by load, best
   first** (ties keep NordVPN's order), cut to as many rows as your
   switch-target setting. The rotate script sorts exactly the same way and
@@ -179,7 +176,7 @@ was showing, and starts immediately.
 ## Testing
 
 `test/run-local.sh` runs the real scripts on a normal PC with every router
-command mocked (`uci`, `ubus`, `wg`, `ping`, ...) — 101 checks covering the
+command mocked (`uci`, `ubus`, `wg`, `ping`, ...) — a lean suite covering the
 switch logic, rollback, recovery after interrupted switches, the lock
 collision, small candidate counts, and the dashboard rendering and POST
 handling. It runs fine in Git Bash on Windows; you need `python` on the

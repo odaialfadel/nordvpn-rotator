@@ -206,38 +206,26 @@ if [ -f "$RECO" ]; then
     ROWS="$ROWS$CUR_ROW"
 fi
 
-# --- decision -----------------------------------------------------------------
+# --- next-pick chip -----------------------------------------------------------
 LAST_SWITCH="never (or state cleared by reboot)"
-DWELL_LEFT=""
 last=$(cat "$STATE_DIR/last_switch" 2>/dev/null)
 if is_uint "$last" && [ "$last" -gt 0 ]; then
     ago_min=$(( (NOW - last) / 60 ))
     if [ "$ago_min" -ge 120 ]; then LAST_SWITCH="$((ago_min / 60)) h ago"; else LAST_SWITCH="$ago_min min ago"; fi
-    [ "$ago_min" -lt "$MIN_DWELL_MIN" ] && DWELL_LEFT=$((MIN_DWELL_MIN - ago_min))
 fi
 
+# WOULD mirrors the rotate script's decision: switch when the current server
+# dropped out of the pool, or is over the line while the best candidate is
+# under it and enough points better
 WOULD=0
-if [ "$FOUND" -eq 0 ]; then
-    VERDICT="No decision data yet — the rotator has not completed a cycle since the last reboot."
-elif [ -z "$CUR_LOAD" ]; then
-    if [ -n "$BEST_HOST" ]; then
-        VERDICT="Current server is not in the top $FOUND recommendations — next cycle switches to $BEST_HOST (${BEST_LOAD}% load)."
+if [ "$FOUND" -gt 0 ] && [ -n "$BEST_LOAD" ]; then
+    if [ -z "$CUR_LOAD" ]; then
         WOULD=1
-    else
-        VERDICT="Current server is not in the recommendations and no usable candidate was found — holding."
+    elif [ "$CUR_LOAD" -ge "$LOAD_THRESHOLD" ] && [ "$BEST_LOAD" -lt "$LOAD_THRESHOLD" ] \
+        && [ "$BEST_LOAD" -le $((CUR_LOAD - MIN_IMPROVEMENT)) ]; then
+        WOULD=1
     fi
-elif [ "$CUR_LOAD" -lt "$LOAD_THRESHOLD" ]; then
-    VERDICT="Holding — $CUR_HOST at ${CUR_LOAD}% is under the ${LOAD_THRESHOLD}% switch line."
-elif [ -n "$BEST_LOAD" ] && [ "$BEST_LOAD" -ge "$LOAD_THRESHOLD" ]; then
-    VERDICT="$CUR_HOST is over the line at ${CUR_LOAD}%, but every candidate is loaded too — holding."
-elif [ -n "$BEST_LOAD" ] && [ "$BEST_LOAD" -le $((CUR_LOAD - MIN_IMPROVEMENT)) ]; then
-    VERDICT="Over the line — $CUR_HOST at ${CUR_LOAD}%; next cycle switches to $BEST_HOST (${BEST_LOAD}% load, ${MIN_IMPROVEMENT}+ points better)."
-    WOULD=1
-else
-    VERDICT="$CUR_HOST is over the line at ${CUR_LOAD}%, but the best candidate is not ${MIN_IMPROVEMENT} points better — holding."
 fi
-[ -n "$DWELL_LEFT" ] && VERDICT="$VERDICT Dwell guard: no automatic switch for another $DWELL_LEFT min."
-[ "$DRY_RUN" = "1" ] && VERDICT="$VERDICT Dry-run: decisions are only logged."
 
 NEXT_CHIP=""
 [ "$WOULD" = "1" ] && NEXT_CHIP='<span class="chip next">next pick</span>'
@@ -351,21 +339,6 @@ if [ -n "$FETCH_AGE" ]; then
     [ "$FETCH_AGE" -gt 40 ] && FRESH_NOTE="$FRESH_NOTE <span class=\"stale\">stale &mdash; is cron running?</span>"
 fi
 
-GAUGE=""
-if [ "$FOUND" -gt 0 ]; then
-    DOTS=""
-    LEGEND="<span class=\"lg\"><i class=\"tickl\"></i> switch line ${LOAD_THRESHOLD}%</span>"
-    if [ -n "$CUR_LOAD" ]; then
-        DOTS="$DOTS<b class=\"dot dc\" style=\"left:${CUR_LOAD}%\"></b>"
-        LEGEND="<span class=\"lg\"><i class=\"dl dc\"></i> current ${CUR_LOAD}%</span> $LEGEND"
-    fi
-    if [ -n "$BEST_LOAD" ]; then
-        DOTS="$DOTS<b class=\"dot db\" style=\"left:${BEST_LOAD}%\"></b>"
-        LEGEND="$LEGEND <span class=\"lg\"><i class=\"dl db\"></i> best candidate ${BEST_LOAD}%</span>"
-    fi
-    GAUGE="<div class=\"track\" style=\"--th:${LOAD_THRESHOLD}%\"><i class=\"zone\"></i><b class=\"tick\"></b>$DOTS</div><div class=\"legend\">$LEGEND</div>"
-fi
-
 # --- render -------------------------------------------------------------------
 printf 'Content-Type: text/html; charset=utf-8\r\n\r\n'
 cat <<HTML
@@ -426,17 +399,9 @@ h1{font:600 26px/1.2 var(--mono);margin:2px 0 6px;word-break:break-all}
 .sub{color:var(--mut);font-size:15px}
 .facts{color:var(--dim);font-size:12.5px;margin-top:10px;font-family:var(--mono)}
 .hs.good{color:var(--tealtx)} .hs.warn{color:var(--ambertx)} .hs.bad{color:var(--redtx)}
-.track{position:relative;height:12px;border-radius:6px;background:var(--soft);margin:18px 8px 8px}
-.zone{position:absolute;left:var(--th);right:0;top:0;bottom:0;background:rgba(230,76,123,.15);border-radius:0 6px 6px 0}
-.tick{position:absolute;left:var(--th);top:-4px;bottom:-4px;width:2px;background:var(--red)}
-.dot{position:absolute;top:50%;width:14px;height:14px;border-radius:50%;
- transform:translate(-50%,-50%);border:2px solid var(--panel);box-shadow:0 0 0 1px var(--line)}
-.dc{background:var(--teal)} .db{background:var(--blue)}
-.legend{display:flex;gap:16px;flex-wrap:wrap;color:var(--dim);font-size:12px;margin:0 8px 12px}
-.dl{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px}
-.tickl{display:inline-block;width:2px;height:10px;background:var(--red);margin-right:5px}
-.verdict{font-size:15px;margin:0}
-.decfoot{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-top:12px}
+.hero{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}
+.heroinfo{min-width:0}
+.forcebox{flex:none;margin-top:4px}
 .board{overflow-x:auto}
 table{border-collapse:collapse;width:100%}
 th{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);
@@ -537,18 +502,14 @@ button:focus-visible,input:focus-visible,summary:focus-visible,a:focus-visible{
 $MSG_HTML
 $([ "$VPN_UP" = "yes" ] || echo '<div class="warnbox">VPN interface is DOWN or off &mdash; the rotator leaves it alone while off.</div>')
 <div class="panel">
+<div class="hero">
+<div class="heroinfo">
 <p class="eyebrow">current server</p>
 <h1>$(printf '%s' "${HERO_HOST:-?}" | esc)</h1>
 <div class="sub">$HERO_SUB</div>
 <div class="facts">endpoint $(printf '%s' "${CUR_IP:-?}" | esc)$CFG_NOTE &middot; handshake <span class="hs $HS_CLS">$HS_TEXT</span> &middot; last switch $LAST_SWITCH</div>
 </div>
-<div class="panel">
-<p class="eyebrow">decision</p>
-$GAUGE
-<p class="verdict">$(printf '%s' "$VERDICT" | esc)</p>
-<div class="decfoot">
-<span class="note">policy: switch when load &#8805; ${LOAD_THRESHOLD}% and a candidate is ${MIN_IMPROVEMENT}+ points lower &middot; ${MIN_DWELL_MIN} min dwell$([ "$NIGHTLY_ROTATE" = "1" ] && echo " &middot; nightly fresh IP 04:15")</span>
-<form method="post" onsubmit="return confirm('$FORCE_CONFIRM')">
+<form method="post" class="forcebox" onsubmit="return confirm('$FORCE_CONFIRM')">
 <input type="hidden" name="action" value="force">
 <button class="danger">$FORCE_LABEL</button>
 </form>
