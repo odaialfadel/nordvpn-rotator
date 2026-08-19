@@ -1,0 +1,11 @@
+# Everything here ships to a BusyBox router — LF endings are load-bearing.
+# install.sh strips CRLF defensively, but a fresh checkout must be correct on
+# its own (core.autocrlf=true would otherwise break every script on Windows).
+* text=auto
+*.sh text eol=lf
+*.cgi text eol=lf
+*.conf text eol=lf
+test/mock-bin/* text eol=lf
+package/* text eol=lf
+*.png binary
+*.ipk binary

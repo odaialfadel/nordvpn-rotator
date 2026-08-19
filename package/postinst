@@ -12,6 +12,7 @@ CRONTAB=/etc/crontabs/root
 # for the lock and the nightly rotation would silently lose
 NIGHTLY_LINE="15 4 * * * $BIN nightly"
 
+mkdir -p "$(dirname "$CRONTAB")"
 touch "$CRONTAB"
 grep -qF "$BIN run" "$CRONTAB" || echo "*/30 * * * * $BIN run" >> "$CRONTAB"
 # migrate any older nightly line (e.g. the 04:30 one)

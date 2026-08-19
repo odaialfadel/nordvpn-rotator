@@ -29,16 +29,21 @@ DRY_RUN="${DRY_RUN:-0}"
 WG_IFACE="${WG_IFACE:-wgclient}"
 PEER_SECTION="${PEER_SECTION:-}"
 COUNTRY_ID="${COUNTRY_ID:-81}"
+# same guard as the engine: a hand-edited non-numeric value must degrade to the
+# default, not kill the page (ash arithmetic errors are fatal)
 case "$COUNTRY_ID" in ''|*[!0-9]*) COUNTRY_ID=81 ;; esac
 CANDIDATES="${CANDIDATES:-20}"
 case "$CANDIDATES" in ''|*[!0-9]*) CANDIDATES=20 ;; esac
+case "$LOAD_THRESHOLD" in ''|*[!0-9]*) LOAD_THRESHOLD=60 ;; esac
+case "$MIN_IMPROVEMENT" in ''|*[!0-9]*) MIN_IMPROVEMENT=15 ;; esac
+case "$MIN_DWELL_MIN" in ''|*[!0-9]*) MIN_DWELL_MIN=60 ;; esac
 STATE_DIR="${STATE_DIR:-/tmp/nordvpn-rotate}"
 LOG_FILE="${LOG_FILE:-/tmp/nordvpn-rotate.log}"
 RECO="$STATE_DIR/reco.json"
 LAT_FILE="$STATE_DIR/latency"
 ROTATE_BIN="${NVR_ROTATE_BIN:-/usr/bin/nordvpn-rotate.sh}"
 
-esc() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+esc() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'; }
 jf() { jsonfilter -i "$RECO" -e "$1" 2>/dev/null; }
 is_uint() { case "$1" in ''|*[!0-9]*) return 1;; *) return 0;; esac; }
 rtt_of() { awk -v ip="$1" '$1==ip{print $2; exit}' "$LAT_FILE" 2>/dev/null; }
@@ -48,8 +53,24 @@ redirect() { printf 'Status: 303 See Other\r\nLocation: %s\r\n\r\n' "$1"; exit 0
 
 # --- POST: actions ------------------------------------------------------------
 if [ "$REQUEST_METHOD" = "POST" ]; then
+    # two-step CSRF gate. (1) The request's Host must be this router — that
+    # stops DNS rebinding, where an attacker's domain resolves to 192.168.8.1
+    # and the browser happily sends Host/Referer of the attacker's own origin.
+    # (2) The Referer must START with scheme://Host/ — an anchored match, so
+    # "http://evil.example/#//192.168.8.1/" can't sneak past as a substring.
+    host_ok=0
+    case "$HTTP_HOST" in
+        192.168.8.1|192.168.8.1:*|console.gl-inet.com|console.gl-inet.com:*) host_ok=1 ;;
+    esac
+    if [ "$host_ok" != "1" ]; then
+        LAN_IP=$(uci -q get network.lan.ipaddr 2>/dev/null)
+        if [ -n "$LAN_IP" ]; then
+            case "$HTTP_HOST" in "$LAN_IP"|"$LAN_IP:"*) host_ok=1 ;; esac
+        fi
+    fi
+    [ "$host_ok" = "1" ] || fail "403 Forbidden" "request Host is not this router"
     case "$HTTP_REFERER" in
-        *"//$HTTP_HOST/"*|*"//192.168.8.1/"*) : ;;
+        "http://$HTTP_HOST/"*|"https://$HTTP_HOST/"*) : ;;
         *) fail "403 Forbidden" "cross-site request rejected" ;;
     esac
     len="${CONTENT_LENGTH:-0}"
@@ -216,14 +237,21 @@ if is_uint "$last" && [ "$last" -gt 0 ]; then
     if [ "$ago_min" -ge 120 ]; then LAST_SWITCH="$((ago_min / 60)) h ago"; else LAST_SWITCH="$ago_min min ago"; fi
 fi
 
-# WOULD mirrors the rotate script's decision: switch when the current server
-# dropped out of the pool, or is over the line while the best candidate is
-# under it and enough points better
+# WOULD mirrors the rotate script's decision: claim "next pick" only when the
+# engine would actually switch on its next cycle — every automatic switch needs
+# a best candidate under the line AND an expired dwell window, and the delist
+# path additionally needs the deep probe to have already missed (cur_miss)
+DWELL_OK=1
+if is_uint "$last" && [ "$last" -gt 0 ] && [ $((NOW - last)) -lt $((MIN_DWELL_MIN * 60)) ]; then
+    DWELL_OK=0
+fi
 WOULD=0
-if [ "$FOUND" -gt 0 ] && [ -n "$BEST_LOAD" ]; then
+if [ "$FOUND" -gt 0 ] && [ -n "$BEST_LOAD" ] && [ "$DWELL_OK" = "1" ] && [ "$BEST_LOAD" -lt "$LOAD_THRESHOLD" ]; then
     if [ -z "$CUR_LOAD" ]; then
-        WOULD=1
-    elif [ "$CUR_LOAD" -ge "$LOAD_THRESHOLD" ] && [ "$BEST_LOAD" -lt "$LOAD_THRESHOLD" ] \
+        m_ip=""; m_n=""
+        [ -f "$STATE_DIR/cur_miss" ] && read -r m_ip m_n < "$STATE_DIR/cur_miss"
+        [ "$m_ip" = "$CUR_IP" ] && is_uint "$m_n" && [ "$m_n" -ge 1 ] && WOULD=1
+    elif [ "$CUR_LOAD" -ge "$LOAD_THRESHOLD" ] \
         && [ "$BEST_LOAD" -le $((CUR_LOAD - MIN_IMPROVEMENT)) ]; then
         WOULD=1
     fi
@@ -329,11 +357,27 @@ COUNTRY_ESC=$(printf '%s' "$COUNTRY_NAME" | esc)
 HERO_HOST="${CUR_HOST:-$CUR_IP}"
 HERO_SUB=""
 if [ -n "$CUR_HOST" ]; then
-    [ -n "$CUR_CITY" ] && HERO_SUB="$CUR_CITY"
+    [ -n "$CUR_CITY" ] && HERO_SUB="$(printf '%s' "$CUR_CITY" | esc)"
     [ -n "$CUR_LOAD" ] && HERO_SUB="${HERO_SUB:+$HERO_SUB &middot; }load ${CUR_LOAD}%"
     [ -n "$CUR_RANK" ] && HERO_SUB="${HERO_SUB:+$HERO_SUB &middot; }rank $CUR_RANK of $FOUND"
 else
-    HERO_SUB="not in current recommendations"
+    # not on the board — the engine's deep probe knows more: a fresh probe hit
+    # means "still recommended, just beyond the pool"; a recorded miss means
+    # the engine is verifying a real delist before it switches
+    HERO_SUB="not in the current top $FOUND board"
+    PROBE_F="$STATE_DIR/reco-probe.json"
+    pf_age=""
+    pt=$(date -r "$PROBE_F" +%s 2>/dev/null)
+    is_uint "$pt" && pf_age=$(( (NOW - pt) / 60 ))
+    m_ip=""; m_n=""
+    [ -f "$STATE_DIR/cur_miss" ] && read -r m_ip m_n < "$STATE_DIR/cur_miss"
+    if [ -n "$pf_age" ] && [ "$pf_age" -le 40 ] \
+        && jsonfilter -i "$PROBE_F" -e "@[@.station=\"$CUR_IP\"].hostname" >/dev/null 2>&1; then
+        bl=$(jsonfilter -i "$PROBE_F" -e "@[@.station=\"$CUR_IP\"].load" 2>/dev/null | head -n 1)
+        HERO_SUB="$HERO_SUB &mdash; still recommended${bl:+, load ${bl}%}"
+    elif [ "$m_ip" = "$CUR_IP" ] && is_uint "$m_n" && [ "$m_n" -ge 1 ]; then
+        HERO_SUB="$HERO_SUB &mdash; absent from the deep probe $m_n&times;, verifying before any switch"
+    fi
 fi
 [ -z "$CUR_RTT" ] && [ -n "$CUR_IP" ] && CUR_RTT=$(rtt_of "$CUR_IP")
 [ -n "$CUR_RTT" ] && HERO_SUB="$HERO_SUB &middot; ${CUR_RTT} ms"
@@ -539,7 +583,7 @@ $(if [ -n "$ROWS" ]; then cat <<BOARD
 $ROWS
 </table>
 </div>
-<p class="tblnote">NordVPN's recommendation pool sorted by load, ties keep NordVPN's order &mdash; a force switch takes the top non-current row &middot; rtt pinged from the router each cycle (current server direct, others through the tunnel) &middot; the tick on each bar is the ${LOAD_THRESHOLD}% switch line</p>
+<p class="tblnote">NordVPN's recommendation pool sorted by load, ties keep NordVPN's order &mdash; a force switch takes the top non-current row with a usable key &middot; rtt pinged from the router each cycle (current server direct, others through the tunnel) &middot; the tick on each bar is the ${LOAD_THRESHOLD}% switch line</p>
 BOARD
 else
     echo '<p class="empty">no candidate data yet &mdash; the rotator has not run since the last reboot.</p>'

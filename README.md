@@ -37,10 +37,15 @@ Every 30 minutes, cron runs one decision cycle:
 
 1. Fetch NordVPN's recommended servers for your country. Public API, no
    account or token needed.
-2. Find your current server in that list.
+2. Find your current server in that list. If it's not there, that alone means
+   nothing — NordVPN rotates which ~20 servers the API surfaces — so the
+   script looks it up in a much deeper top-100 probe before drawing any
+   conclusion.
 3. Switch only when the current server is at or above the load threshold
-   (default 60%) **and** some candidate is at least 15 points lower. Having
-   dropped out of the recommended list entirely also counts as a reason.
+   (default 60%) **and** some candidate is at least 15 points lower. Being
+   truly delisted also counts as a reason, but only after the deep probe
+   misses it on two consecutive cycles — a single miss is just the API
+   shuffling its answer.
 4. Health-check the new tunnel (WireGuard handshake plus a ping through it).
    If it doesn't come up, roll back to the old server automatically.
 
@@ -158,6 +163,11 @@ editable from the dashboard.
 | `CANDIDATES` | `20` | How many top-ranked servers are switch targets (min. 20 are always fetched so the current server stays tracked) |
 | `NIGHTLY_ROTATE` | `1` | 1 = rotate every night at 04:15 for a fresh IP (default on) |
 | `WG_IFACE` | `wgclient` | WireGuard client interface (`wgclient1` on the XE3000) |
+| `PROBE_LIMIT` | `100` | Depth of the delist probe — how far down the recommendations the current server may sit before it counts as missing |
+| `MISS_LIMIT` | `2` | Consecutive probe misses before "delisted" becomes a switch reason |
+
+A bad (non-numeric) value in any numeric key silently falls back to the
+default — the engine and the dashboard both refuse to act on garbage.
 
 ## Commands
 
