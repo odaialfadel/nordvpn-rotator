@@ -57,10 +57,13 @@ check_absent() {
 }
 
 mkconf() { # $1 = API url, $2 = extra lines
+    # the harness defaults to DRY_RUN=1 so scenarios must opt INTO live mode —
+    # the shipped default is live (DRY_RUN=0), covered by its own scenario
     {
         echo "LOAD_THRESHOLD=60"
         echo "MIN_IMPROVEMENT=15"
         echo "MIN_DWELL_MIN=60"
+        echo "DRY_RUN=1"
         echo "STATE_DIR=$NVR_TEST_DIR/state"
         echo "LOG_FILE=$LOG"
         echo "PREV_FILE=$NVR_TEST_DIR/state/prev"
@@ -195,12 +198,18 @@ reset "203.0.113.99" "$NOPUB_URL" ""
 sh "$SCRIPT" run
 check "half-parsed candidate skipped, next taken" "would switch 203.0.113.99 -> $H1" "$LOG"
 
-echo "=== 12. DRY_RUN typo (yes) -> stays dry, warns"
+echo "=== 12. DRY_RUN typo (yes) -> noted, treated as live (live is the default mode)"
 reset "203.0.113.99" "$SAMPLE_URL" "DRY_RUN=yes"
 sh "$SCRIPT" run
 check "typo noted" "DRY_RUN='yes' unrecognized" "$LOG"
-check "still dry" "DRY-RUN: would switch" "$LOG"
-check_absent "typo cannot go live" "uci set" "$NVR_TEST_DIR/actions.log"
+check "typo falls back to live" "SWITCHED: now on" "$LOG"
+
+echo "=== 12a. no DRY_RUN key at all -> live by default, really switches"
+reset "203.0.113.99" "$SAMPLE_URL" ""
+sed -i '/^DRY_RUN=/d' "$NVR_CONF"
+sh "$SCRIPT" run
+check "default is live" "SWITCHED: now on" "$LOG"
+check "endpoint really written" "end_point=$S0:51820" "$NVR_TEST_DIR/uci.env"
 
 echo "=== 12b. force in dry-run -> announces, ignores dwell, touches nothing"
 reset "$S0" "$SAMPLE_URL" ""
@@ -217,13 +226,46 @@ check "forced switch executed" "SWITCHED: now on" "$LOG"
 check "forced reason logged" "forced switch (manual)" "$LOG"
 check "moved off the healthy rank-1 server" "end_point=$S1:51820" "$NVR_TEST_DIR/uci.env"
 
-echo "=== 12d. nightly honors the conf flag"
+echo "=== 12d. nightly is ON by default, honors an explicit off"
 reset "$S0" "$SAMPLE_URL" ""
 sh "$SCRIPT" nightly
-check_absent "nightly off -> silent no-op" "would switch" "$LOG"
-reset "$S0" "$SAMPLE_URL" "NIGHTLY_ROTATE=1"
+check "nightly default on -> dry-run announce" "forced switch (nightly rotation)" "$LOG"
+reset "$S0" "$SAMPLE_URL" "NIGHTLY_ROTATE=0"
 sh "$SCRIPT" nightly
-check "nightly on -> dry-run announce" "forced switch (nightly rotation)" "$LOG"
+check_absent "nightly off -> silent no-op" "would switch" "$LOG"
+
+echo "=== 12e. forced/nightly switch proceeds even when every candidate is loaded (fresh IP wins)"
+reset "203.0.113.99" "$ALLHOT_URL" "DRY_RUN=0"
+sh "$SCRIPT" nightly
+check "loaded candidate noted, not held" "fresh IP wins" "$LOG"
+check "nightly switched anyway" "SWITCHED: now on" "$LOG"
+
+echo "=== 12f. lock: regular run yields, forced run waits (04:30 cron collision fix)"
+reset "$S0" "$SAMPLE_URL" ""
+mkdir -p "$NVR_TEST_DIR/state/lock"
+sh "$SCRIPT" run
+check "regular run skips immediately" "skipped: another run in progress" "$LOG"
+rm -f "$LOG"
+sh "$SCRIPT" force
+check "forced run waited before giving up" "another run still busy after 2 min wait" "$LOG"
+rmdir "$NVR_TEST_DIR/state/lock"
+rm -f "$LOG"
+sh "$SCRIPT" force
+check "forced run proceeds once the lock is free" "forced switch (manual)" "$LOG"
+
+echo "=== 12g. CANDIDATES=5: current server at rank 7 stays visible to the engine"
+S6=$(jsonfilter -i "$SAMPLE" -e '@[6].station')
+reset "$S6" "$SAMPLE_URL" "CANDIDATES=5"
+sh "$SCRIPT" run
+check "current matched beyond the target window" "rank 7 of 20" "$LOG"
+check_absent "no bogus not-recommended switch" "not matched in top" "$LOG"
+
+echo "=== 12h. refresh: re-fetches candidate data, decides nothing"
+reset "$S0" "$SAMPLE_URL" ""
+sh "$SCRIPT" refresh
+check "refresh logged" "refreshed: 20 servers fetched" "$LOG"
+check "latency cache rebuilt" "^$S0 23" "$NVR_TEST_DIR/state/latency"
+check_absent "refresh never decides" "would switch\|SWITCHED\|OK:" "$LOG"
 
 echo "=== 13. dashboard CGI renders current state, read-only"
 reset "$S0" "$SAMPLE_URL" ""
@@ -238,6 +280,7 @@ check "candidate load rendered" "load" "$DASH"
 check "rtt column rendered from latency cache" "23 ms" "$DASH"
 check "verdict sentence rendered" "Holding" "$DASH"
 check "log tail included" "OK: de" "$DASH"
+check "settings form rendered without any secret" "cfgform" "$DASH"
 check_absent "dashboard writes nothing" "uci set" "$NVR_TEST_DIR/actions.log"
 check_absent "no shell errors" "." "$NVR_TEST_DIR/dash.err"
 
@@ -249,25 +292,36 @@ check "renders without state" "no candidate data yet" "$DASH"
 check "log placeholder shown" "(no log yet)" "$DASH"
 check_absent "no shell errors on empty state" "." "$NVR_TEST_DIR/dash.err"
 
-echo "=== 13c. dashboard POST: save config (secret + valid credentials)"
-SECRETF="$NVR_TEST_DIR/dash.secret"
-echo "testpw123" > "$SECRETF"
-GOODAUTH="Basic $(printf '%s' "admin:testpw123" | openssl base64)"
-post() { # $1 body, $2 referer override, $3 secret file override, $4 auth override
+echo "=== 13c. dashboard POST: save config (no auth layer — LAN page)"
+post() { # $1 body, $2 referer override
     printf '%s' "$1" | REQUEST_METHOD=POST CONTENT_LENGTH=$(printf '%s' "$1" | wc -c) \
         HTTP_HOST=192.168.8.1 HTTP_REFERER="${2:-http://192.168.8.1/cgi-bin/rotator}" \
-        NVR_SECRET_FILE="${3:-$SECRETF}" HTTP_AUTHORIZATION="${4:-$GOODAUTH}" \
         NVR_ROTATE_BIN="$SCRIPT" \
         sh "$ROOT/rotator-dashboard.cgi" 2>"$NVR_TEST_DIR/post.err"
 }
 reset "$S0" "$SAMPLE_URL" ""
-post "action=save&LOAD_THRESHOLD=55&MIN_IMPROVEMENT=20&MIN_DWELL_MIN=90&COUNTRY_ID=81&CANDIDATES=20&NIGHTLY_ROTATE=1&LIVE_MODE=1" > "$NVR_TEST_DIR/post.out"
+post "action=save&LOAD_THRESHOLD=55&MIN_IMPROVEMENT=20&MIN_DWELL_MIN=90&COUNTRY_ID=81&CANDIDATES=20&NIGHTLY_ROTATE=1&MODE=live" > "$NVR_TEST_DIR/post.out"
 check "save redirects" "303" "$NVR_TEST_DIR/post.out"
 check "threshold written" "^LOAD_THRESHOLD=55" "$NVR_CONF"
 check "nightly written" "^NIGHTLY_ROTATE=1" "$NVR_TEST_DIR/conf"
-check "live checkbox arms" "^DRY_RUN=0" "$NVR_CONF"
+check "mode live -> DRY_RUN=0" "^DRY_RUN=0" "$NVR_CONF"
+# a save kicks off an immediate background refresh with the new settings
+n=0
+while [ "$n" -lt 160 ] && ! grep -q "refreshed:" "$LOG" 2>/dev/null; do
+    /bin/sleep 0.25 2>/dev/null || sleep 1
+    n=$((n + 1))
+done
+check "save triggers an immediate data refresh" "refreshed: 20 servers fetched" "$LOG"
+post "action=save&LOAD_THRESHOLD=55&MIN_IMPROVEMENT=20&MIN_DWELL_MIN=90&COUNTRY_ID=81&CANDIDATES=20&MODE=dry" > "$NVR_TEST_DIR/post.out"
+check "mode dry -> DRY_RUN=1" "^DRY_RUN=1" "$NVR_CONF"
+# wait for this save's background refresh too, so later scenarios start clean
+n=0
+while [ "$n" -lt 160 ] && [ "$(grep -c 'refreshed:' "$LOG" 2>/dev/null)" -lt 2 ]; do
+    /bin/sleep 0.25 2>/dev/null || sleep 1
+    n=$((n + 1))
+done
 post "action=save&LOAD_THRESHOLD=55&MIN_IMPROVEMENT=20&MIN_DWELL_MIN=90&COUNTRY_ID=81&CANDIDATES=20" > "$NVR_TEST_DIR/post.out"
-check "unchecking live disarms" "^DRY_RUN=1" "$NVR_CONF"
+check "missing mode -> 400" "400" "$NVR_TEST_DIR/post.out"
 check_absent "no shell errors on save" "." "$NVR_TEST_DIR/post.err"
 
 echo "=== 13d. dashboard POST: bad values rejected, conf untouched"
@@ -293,18 +347,30 @@ done
 check "forced cycle logged" "forced switch (manual)" "$LOG"
 check_absent "dry-run: no uci writes" "uci set" "$NVR_TEST_DIR/actions.log"
 
-echo "=== 13f. dashboard auth: bad/missing credentials and foreign sites refused"
-post "action=force" "" "" "Basic $(printf '%s' "admin:WRONG" | openssl base64)" > "$NVR_TEST_DIR/post.out"
-check "wrong password -> 401" "401" "$NVR_TEST_DIR/post.out"
-NVR_SECRET_FILE="$SECRETF" sh "$ROOT/rotator-dashboard.cgi" > "$NVR_TEST_DIR/post.out" 2>/dev/null
-check "GET without credentials -> 401" "401 Unauthorized" "$NVR_TEST_DIR/post.out"
-check "401 carries browser challenge" "WWW-Authenticate" "$NVR_TEST_DIR/post.out"
+echo "=== 13f. dashboard: cross-site POSTs still rejected (the only gate left)"
 post "action=force" "http://evil.example/attack" > "$NVR_TEST_DIR/post.out"
 check "foreign referer -> 403" "403" "$NVR_TEST_DIR/post.out"
-post "action=force" "http://192.168.8.1/cgi-bin/rotator" "$NVR_TEST_DIR/nonexistent.secret" "" > "$NVR_TEST_DIR/post.out"
-check "no secret file -> POST refused 403" "403" "$NVR_TEST_DIR/post.out"
-sh "$ROOT/rotator-dashboard.cgi" > "$NVR_TEST_DIR/dash.html" 2>/dev/null
-check "GET without secret stays open, controls disabled" "controls disabled" "$NVR_TEST_DIR/dash.html"
+
+echo "=== 13g. dashboard: CANDIDATES=5 keeps the current server on the board (rank 7)"
+reset "$S6" "$SAMPLE_URL" "CANDIDATES=5"
+sh "$SCRIPT" run
+sh "$ROOT/rotator-dashboard.cgi" > "$DASH" 2>"$NVR_TEST_DIR/dash.err"
+H6=$(jsonfilter -i "$SAMPLE" -e '@[6].hostname')
+check "current row appended below the cutoff" "not a switch target" "$DASH"
+check "current server still shown + marked" "$H6" "$DASH"
+check "real rank kept on the appended row" ">7<" "$DASH"
+check "verdict knows the current load" "under the 60% switch line" "$DASH"
+check_absent "no shell errors with a small candidate count" "." "$NVR_TEST_DIR/dash.err"
+
+echo "=== 13h. dashboard: dry-run log lines only show in dry-run mode"
+reset "203.0.113.99" "$SAMPLE_URL" ""
+sh "$SCRIPT" run     # writes a DRY-RUN: would switch line (harness conf is dry)
+sed -i 's/^DRY_RUN=1/DRY_RUN=0/' "$NVR_CONF"
+sh "$ROOT/rotator-dashboard.cgi" > "$DASH" 2>/dev/null
+check_absent "live mode hides dry-run chatter" "DRY-RUN: would switch" "$DASH"
+sed -i 's/^DRY_RUN=0/DRY_RUN=1/' "$NVR_CONF"
+sh "$ROOT/rotator-dashboard.cgi" > "$DASH" 2>/dev/null
+check "dry-run mode shows its own announcements" "DRY-RUN: would switch" "$DASH"
 
 echo "==="
 echo "result: $pass passed, $fail failed"

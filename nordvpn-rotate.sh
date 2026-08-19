@@ -3,14 +3,17 @@
 #
 # Policy: every cron run, fetch NordVPN's recommended servers (sorted best-first,
 # with load %). Switch ONLY when the current server is overloaded or has dropped
-# out of the recommended set entirely — otherwise do nothing. DRY_RUN=1 (the
-# default) never touches the tunnel; it only logs what it would do.
+# out of the recommended set entirely — otherwise do nothing. Runs LIVE by
+# default; DRY_RUN=1 is the opt-in testing mode that only logs what it would do.
 #
 # Commands:
 #   run     one decision cycle (what cron calls)          [default]
 #   force   switch to the best candidate NOW (fresh IP when a site blocks you);
 #           skips the load/dwell gates, keeps health check + rollback + DRY_RUN
-#   nightly like force, but only when NIGHTLY_ROTATE=1 (cron calls it ~04:30)
+#   nightly like force, but only when NIGHTLY_ROTATE=1 (cron calls it 04:15 —
+#           NOT :00/:30, which would collide with the regular run for the lock)
+#   refresh re-fetch the candidate list + latency with the current settings,
+#           decide nothing (the dashboard calls it right after a config save)
 #   check   read-only pre-flight: verify every assumption on this router
 #   status  current server, last switch, recent log
 #
@@ -18,7 +21,7 @@
 # Optional: wg (better health check). Never touches: private key, address, MTU,
 # kill switch, DNS. Only ever edits end_point/public_key of the active peer.
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 CONF="${NVR_CONF:-/etc/nordvpn-rotate.conf}"
 [ -f "$CONF" ] && . "$CONF"
 
@@ -26,10 +29,10 @@ CONF="${NVR_CONF:-/etc/nordvpn-rotate.conf}"
 COUNTRY_ID="${COUNTRY_ID:-81}"            # 81 = Germany
 LOAD_THRESHOLD="${LOAD_THRESHOLD:-60}"    # switch when current load >= this %
 MIN_IMPROVEMENT="${MIN_IMPROVEMENT:-15}"  # candidate must be this much lower %
-CANDIDATES="${CANDIDATES:-20}"            # how many recommended servers to fetch
+CANDIDATES="${CANDIDATES:-20}"            # switch targets considered/displayed
 MIN_DWELL_MIN="${MIN_DWELL_MIN:-60}"      # min minutes between switch attempts
-NIGHTLY_ROTATE="${NIGHTLY_ROTATE:-0}"     # 1 = rotate once nightly via cron (fresh IP)
-DRY_RUN="${DRY_RUN:-1}"                   # 1 = log only, never touch the tunnel
+NIGHTLY_ROTATE="${NIGHTLY_ROTATE:-1}"     # 1 = rotate once nightly via cron (fresh IP)
+DRY_RUN="${DRY_RUN:-0}"                   # 1 = log only, never touch the tunnel
 WG_IFACE="${WG_IFACE:-wgclient}"          # GL.iNet 4.x wireguard client iface
 PEER_SECTION="${PEER_SECTION:-}"          # empty = follow network.$WG_IFACE.config
 WG_PORT="${WG_PORT:-51820}"
@@ -37,7 +40,14 @@ STATE_DIR="${STATE_DIR:-/tmp/nordvpn-rotate}"
 LOG_FILE="${LOG_FILE:-/tmp/nordvpn-rotate.log}"
 PREV_FILE="${PREV_FILE:-/etc/nordvpn-rotate.prev}"   # flash: survives reboot mid-switch
 API_TIMEOUT="${API_TIMEOUT:-15}"
-API_URL="${API_URL:-https://api.nordvpn.com/v1/servers/recommendations?filters[country_id]=${COUNTRY_ID}&filters[servers_technologies][identifier]=wireguard_udp&limit=${CANDIDATES}}"
+# fetch a larger pool than CANDIDATES so the CURRENT server can still be found
+# in it (and its load read) even when only a few switch targets are wanted —
+# otherwise CANDIDATES=5 makes the current server "vanish" from the data and
+# every cycle looks like a not-recommended-anymore switch reason
+case "$CANDIDATES" in ''|*[!0-9]*) CANDIDATES=20 ;; esac
+FETCH_LIMIT="$CANDIDATES"
+[ "$FETCH_LIMIT" -lt 20 ] && FETCH_LIMIT=20
+API_URL="${API_URL:-https://api.nordvpn.com/v1/servers/recommendations?filters[country_id]=${COUNTRY_ID}&filters[servers_technologies][identifier]=wireguard_udp&limit=${FETCH_LIMIT}}"
 
 # --- helpers -----------------------------------------------------------------
 log() {
@@ -102,7 +112,7 @@ active_section() {
 probe_latency() {
     : > "$STATE_DIR/latency.new"
     pi=0
-    while [ "$pi" -lt "$CANDIDATES" ]; do
+    while [ "$pi" -lt "$FETCH_LIMIT" ]; do
         st=$(jf "@[$pi].station")
         [ -n "$st" ] || break
         rtt=$(ping -c 1 -W 1 "$st" 2>/dev/null \
@@ -113,16 +123,38 @@ probe_latency() {
     mv "$STATE_DIR/latency.new" "$STATE_DIR/latency"
 }
 
+# take the run lock; with $1=1 wait up to ~2 min for a busy one (a forced or
+# nightly run must survive colliding with a regular cron cycle — the silent
+# 04:30 collision used to eat the nightly rotation entirely)
+take_lock() {
+    if [ -d "$STATE_DIR/lock" ] && [ -n "$(find "$STATE_DIR/lock" -mmin +10 2>/dev/null)" ]; then
+        rmdir "$STATE_DIR/lock" 2>/dev/null
+    fi
+    mkdir "$STATE_DIR/lock" 2>/dev/null && return 0
+    [ "$1" = "1" ] || return 1
+    lw=0
+    while [ "$lw" -lt 24 ]; do
+        sleep 5
+        mkdir "$STATE_DIR/lock" 2>/dev/null && return 0
+        lw=$((lw + 1))
+    done
+    return 1
+}
+
 # --- run: one decision cycle -------------------------------------------------
 cmd_run() {
     mkdir -p "$STATE_DIR"
     RECO="$STATE_DIR/reco.json"
 
-    # stale-lock cleanup (killed run), then take the lock
-    if [ -d "$STATE_DIR/lock" ] && [ -n "$(find "$STATE_DIR/lock" -mmin +10 2>/dev/null)" ]; then
-        rmdir "$STATE_DIR/lock" 2>/dev/null
+    # take the lock; a forced/nightly run waits for a colliding regular cycle
+    if ! take_lock "${FORCE_REASON:+1}"; then
+        if [ -n "$FORCE_REASON" ]; then
+            log "skipped: another run still busy after 2 min wait ($FORCE_REASON lost)"
+        else
+            log "skipped: another run in progress"
+        fi
+        exit 0
     fi
-    mkdir "$STATE_DIR/lock" 2>/dev/null || { log "skipped: another run in progress"; exit 0; }
     trap 'rmdir "$STATE_DIR/lock" 2>/dev/null' EXIT
     # a trapped signal does NOT end the script in ash — exit explicitly
     trap 'rmdir "$STATE_DIR/lock" 2>/dev/null; trap - EXIT; exit 130' INT TERM
@@ -192,11 +224,12 @@ cmd_run() {
     mv "$RECO.new" "$RECO"
     probe_latency
 
-    # walk the best-first candidate list once
+    # walk the best-first list once: the CURRENT server is matched anywhere in
+    # the fetched pool, but switch targets come only from the top $CANDIDATES
     CUR_LOAD=""; CUR_HOST=""; CUR_RANK=""
     BEST_HOST=""; BEST_LOAD=""; BEST_STATION=""; BEST_PUB=""; BEST_LOC=""
     i=0; found=0
-    while [ "$i" -lt "$CANDIDATES" ]; do
+    while :; do
         host=$(jf "@[$i].hostname")
         [ -n "$host" ] || break
         found=$((found + 1))
@@ -205,7 +238,7 @@ cmd_run() {
         is_uint "$load" || { i=$((i + 1)); continue; }
         if [ "$station" = "$CUR_IP" ] || [ "$host" = "$CFG_HOST" ]; then
             CUR_LOAD="$load"; CUR_HOST="$host"; CUR_RANK="$((i + 1))"
-        elif [ -z "$BEST_HOST" ]; then
+        elif [ -z "$BEST_HOST" ] && [ "$i" -lt "$CANDIDATES" ]; then
             # accept a candidate only when its station AND public key parse —
             # never switch onto half-parsed data
             pub=$(jf "@[$i].technologies[@.identifier=\"wireguard_udp\"].metadata[@.name=\"public_key\"].value")
@@ -243,8 +276,14 @@ cmd_run() {
 
     [ -n "$BEST_HOST" ] || { log "HOLD: would switch ($reason) but no candidate found"; exit 0; }
     if [ "$BEST_LOAD" -ge "$LOAD_THRESHOLD" ]; then
-        log "HOLD: would switch ($reason) but best candidate $BEST_HOST is also loaded (${BEST_LOAD}%)"
-        exit 0
+        # a forced/nightly run exists to deliver a FRESH IP — a loaded candidate
+        # still beats keeping yesterday's address, so only automatic runs hold
+        if [ -n "$FORCE_REASON" ]; then
+            log "note: best candidate $BEST_HOST is loaded (${BEST_LOAD}%) but the forced switch proceeds — fresh IP wins"
+        else
+            log "HOLD: would switch ($reason) but best candidate $BEST_HOST is also loaded (${BEST_LOAD}%)"
+            exit 0
+        fi
     fi
 
     # dwell guard (a forced switch is deliberate — dwell does not apply)
@@ -258,12 +297,12 @@ cmd_run() {
         fi
     fi
 
-    # fail-safe gate: ONLY the exact value 0 goes live; any typo stays dry
-    if [ "$DRY_RUN" != "0" ]; then
-        [ "$DRY_RUN" = "1" ] || log "note: DRY_RUN='$DRY_RUN' unrecognized — staying in dry-run (set 0 to go live)"
+    # mode gate: live is the default; ONLY the exact value 1 opts into dry-run
+    if [ "$DRY_RUN" = "1" ]; then
         log "DRY-RUN: would switch $cur_desc -> $BEST_HOST ($BEST_STATION, load ${BEST_LOAD}%) [$reason]"
         exit 0
     fi
+    [ "$DRY_RUN" = "0" ] || log "note: DRY_RUN='$DRY_RUN' unrecognized — treating as live (set 1 for dry-run)"
 
     # apply — marker first (flash), so a reboot/kill mid-switch is recoverable
     log "switching: $cur_desc -> $BEST_HOST ($BEST_STATION, load ${BEST_LOAD}%) [$reason]"
@@ -302,6 +341,33 @@ cmd_run() {
         log "CRITICAL: rollback failed — tunnel down, kill switch is blocking family traffic. Auto-recovery retries next cycle. First aid: GL panel -> VPN Dashboard -> toggle VPN off/on."
     fi
     exit 1
+}
+
+# --- refresh: re-fetch candidate data, decide nothing --------------------------
+# The dashboard fires this in the background right after a config save, so a
+# changed country/candidate count shows up within seconds instead of waiting
+# for the next 30-min cron cycle. Never touches the tunnel.
+cmd_refresh() {
+    mkdir -p "$STATE_DIR"
+    RECO="$STATE_DIR/reco.json"
+    for tool in curl jsonfilter; do
+        command -v "$tool" >/dev/null 2>&1 || die "required tool missing: $tool"
+    done
+    if ! take_lock 1; then
+        log "refresh skipped: another run still busy"
+        exit 0
+    fi
+    trap 'rmdir "$STATE_DIR/lock" 2>/dev/null' EXIT
+    trap 'rmdir "$STATE_DIR/lock" 2>/dev/null; trap - EXIT; exit 130' INT TERM
+    if ! curl -g -fsS --max-time "$API_TIMEOUT" "$API_URL" -o "$RECO.new"; then
+        log "refresh: API fetch failed — keeping the previous candidate list"
+        exit 1
+    fi
+    mv "$RECO.new" "$RECO"
+    probe_latency
+    n=0
+    while [ -n "$(jf "@[$n].hostname")" ]; do n=$((n + 1)); done
+    log "refreshed: $n servers fetched (country $COUNTRY_ID, top $CANDIDATES considered)"
 }
 
 # --- check: read-only pre-flight ---------------------------------------------
@@ -377,7 +443,8 @@ case "${1:-run}" in
     force)   FORCE_REASON="forced switch (manual)"; cmd_run ;;
     nightly) [ "$NIGHTLY_ROTATE" = "1" ] || exit 0
              FORCE_REASON="forced switch (nightly rotation)"; cmd_run ;;
+    refresh) cmd_refresh ;;
     check)   cmd_check ;;
     status)  cmd_status ;;
-    *)       echo "usage: $0 [run|force|nightly|check|status]"; exit 2 ;;
+    *)       echo "usage: $0 [run|force|nightly|refresh|check|status]"; exit 2 ;;
 esac

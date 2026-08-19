@@ -4,38 +4,36 @@
 # /cgi-bin/ on port 80, so it answers at  http://192.168.8.1/cgi-bin/rotator
 # (also :8080 direct, https :8443 self-signed).
 #
-# Auth is handled by this script itself (NOT the web server — GL's nginx runs
-# cgi-bin via fcgiwrap, so server-level auth would not cover port 80): when
-# /etc/rotator-dash.secret exists (root-only, single line), EVERY request must
-# carry matching HTTP Basic credentials (user $DASH_USER, default admin) or
-# gets a 401 — uniform on port 80 (nginx) and 8080 (uhttpd). Without the
-# secret file the page renders read-only and every POST is refused, so an
-# unconfigured install can never be clicked into switching servers. Cross-site
-# POSTs are rejected via the Referer host. Every setting incl. arming (LIVE
-# mode = DRY_RUN=0) is editable here by design. Setup: README, "Dashboard".
+# No authentication by design: this page lives on the LAN of a home router and
+# anyone on that LAN already controls the GL panel. Cross-site POSTs from the
+# internet are still rejected via the Referer host, so a malicious web page
+# cannot click the buttons through your browser. Every setting incl. the
+# live/dry-run mode is editable here.
 #
 # Design notes: Nord palette (Snow Storm light, Polar Night via
-# prefers-color-scheme), system fonts only, no external requests, no JS beyond
-# auto-refresh + confirm guards. RTT column reads $STATE_DIR/latency, written
-# by nordvpn-rotate.sh once per cycle. The "next pick" chip approximates the
-# rotate script's choice (it additionally requires a parseable public key).
+# prefers-color-scheme), system fonts only, no external requests, JS limited to
+# auto-refresh, confirm guards and the settings policy preview. RTT column
+# reads $STATE_DIR/latency, written by nordvpn-rotate.sh once per cycle. The
+# "next pick" chip approximates the rotate script's choice (it additionally
+# requires a parseable public key). After a save the script's `refresh` command
+# re-fetches candidate data in the background so new settings show up within
+# seconds, not on the next 30-min cron cycle.
 
 CONF="${NVR_CONF:-/etc/nordvpn-rotate.conf}"
 [ -f "$CONF" ] && . "$CONF"
 LOAD_THRESHOLD="${LOAD_THRESHOLD:-60}"
 MIN_IMPROVEMENT="${MIN_IMPROVEMENT:-15}"
 MIN_DWELL_MIN="${MIN_DWELL_MIN:-60}"
-NIGHTLY_ROTATE="${NIGHTLY_ROTATE:-0}"
-DRY_RUN="${DRY_RUN:-1}"
+NIGHTLY_ROTATE="${NIGHTLY_ROTATE:-1}"
+DRY_RUN="${DRY_RUN:-0}"
 WG_IFACE="${WG_IFACE:-wgclient}"
 PEER_SECTION="${PEER_SECTION:-}"
 CANDIDATES="${CANDIDATES:-20}"
-DASH_USER="${DASH_USER:-admin}"
+case "$CANDIDATES" in ''|*[!0-9]*) CANDIDATES=20 ;; esac
 STATE_DIR="${STATE_DIR:-/tmp/nordvpn-rotate}"
 LOG_FILE="${LOG_FILE:-/tmp/nordvpn-rotate.log}"
 RECO="$STATE_DIR/reco.json"
 LAT_FILE="$STATE_DIR/latency"
-SECRET_FILE="${NVR_SECRET_FILE:-/etc/rotator-dash.secret}"
 ROTATE_BIN="${NVR_ROTATE_BIN:-/usr/bin/nordvpn-rotate.sh}"
 
 esc() { sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
@@ -46,21 +44,8 @@ rtt_of() { awk -v ip="$1" '$1==ip{print $2; exit}' "$LAT_FILE" 2>/dev/null; }
 fail() { printf 'Status: %s\r\nContent-Type: text/plain\r\n\r\n%s\n' "$1" "$2"; exit 0; }
 redirect() { printf 'Status: 303 See Other\r\nLocation: %s\r\n\r\n' "$1"; exit 0; }
 
-# --- auth: enforced by this script on every request once the secret exists ---
-WRITES=0
-if [ -s "$SECRET_FILE" ]; then
-    WRITES=1
-    expect="Basic $(printf '%s' "$DASH_USER:$(cat "$SECRET_FILE")" | openssl base64 2>/dev/null)"
-    if [ "$HTTP_AUTHORIZATION" != "$expect" ]; then
-        printf 'Status: 401 Unauthorized\r\nWWW-Authenticate: Basic realm="nordvpn-rotator"\r\nContent-Type: text/plain\r\n\r\nauthentication required\n'
-        exit 0
-    fi
-fi
-
 # --- POST: actions ------------------------------------------------------------
 if [ "$REQUEST_METHOD" = "POST" ]; then
-    [ "$WRITES" = "1" ] || fail "403 Forbidden" \
-        "writes disabled: no $SECRET_FILE on the router (see README, Dashboard)"
     case "$HTTP_REFERER" in
         *"//$HTTP_HOST/"*|*"//192.168.8.1/"*) : ;;
         *) fail "403 Forbidden" "cross-site request rejected" ;;
@@ -68,7 +53,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
     len="${CONTENT_LENGTH:-0}"
     is_uint "$len" && [ "$len" -gt 0 ] && [ "$len" -le 4096 ] || fail "400 Bad Request" "bad content length"
     body=$(head -c "$len")
-    action=""; th=""; imp=""; dwell=""; nightly="0"; country=""; cand=""; live="0"
+    action=""; th=""; imp=""; dwell=""; nightly="0"; country=""; cand=""; mode=""
     OLDIFS=$IFS; IFS='&'
     for pair in $body; do
         k="${pair%%=*}"; v="${pair#*=}"
@@ -80,7 +65,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
             NIGHTLY_ROTATE)  nightly="$v" ;;
             COUNTRY_ID)      country="$v" ;;
             CANDIDATES)      cand="$v" ;;
-            LIVE_MODE)       live="$v" ;;
+            MODE)            mode="$v" ;;
         esac
     done
     IFS=$OLDIFS
@@ -98,7 +83,7 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
             && [ "$country" -ge 1 ] && [ "$country" -le 999 ] && [ "$cand" -ge 1 ] && [ "$cand" -le 30 ]; } \
             || fail "400 Bad Request" "out of range (threshold 1-100, improvement 0-100, dwell 0-1440, country 1-999, candidates 1-30)"
         case "$nightly" in 0|1) : ;; *) fail "400 Bad Request" "bad nightly value" ;; esac
-        case "$live" in 0|1) : ;; *) fail "400 Bad Request" "bad live value" ;; esac
+        case "$mode" in live|dry) : ;; *) fail "400 Bad Request" "bad mode value" ;; esac
         setconf() {
             if grep -q "^$1=" "$CONF" 2>/dev/null; then
                 sed -i "s/^$1=.*/$1=$2/" "$CONF"
@@ -112,8 +97,10 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
         setconf NIGHTLY_ROTATE "$nightly"
         setconf COUNTRY_ID "$country"
         setconf CANDIDATES "$cand"
-        # checkbox semantics: LIVE_MODE=1 -> DRY_RUN=0 (armed), absent -> DRY_RUN=1
-        if [ "$live" = "1" ]; then setconf DRY_RUN 0; else setconf DRY_RUN 1; fi
+        if [ "$mode" = "dry" ]; then setconf DRY_RUN 1; else setconf DRY_RUN 0; fi
+        # apply immediately: re-fetch the candidate list with the new settings
+        # in the background — the page shows fresh data on its next refresh
+        "$ROTATE_BIN" refresh >/dev/null 2>&1 &
         redirect "/cgi-bin/rotator?msg=saved" ;;
     *) fail "400 Bad Request" "unknown action" ;;
     esac
@@ -152,37 +139,52 @@ if [ -n "$HS_AGE" ]; then
 fi
 
 # --- candidate board ----------------------------------------------------------
+# The rotate script fetches a pool of at least 20 servers; only the top
+# $CANDIDATES rows are switch targets and get displayed. The CURRENT server is
+# matched anywhere in the pool — when it sits below the display cutoff its row
+# is appended (real rank kept) so it never vanishes from the board.
 CUR_HOST=""; CUR_LOAD=""; CUR_RANK=""; CUR_CITY=""; CUR_RTT=""
 BEST_HOST=""; BEST_LOAD=""
-FOUND=0; ROWS=""; FETCHED=""; FETCH_AGE=""; COUNTRY_NAME=""
+FOUND=0; ROWS=""; CUR_ROW=""; FETCHED=""; FETCH_AGE=""; COUNTRY_NAME=""
 if [ -f "$RECO" ]; then
     FETCHED=$(date -r "$RECO" '+%H:%M' 2>/dev/null)
     ft=$(date -r "$RECO" +%s 2>/dev/null)
     is_uint "$ft" && FETCH_AGE=$(( (NOW - ft) / 60 ))
     COUNTRY_NAME=$(jf '@[0].locations[0].country.name')
     i=0
-    while [ "$i" -lt "$CANDIDATES" ]; do
+    while :; do
         host=$(jf "@[$i].hostname"); [ -n "$host" ] || break
         FOUND=$((i + 1))
+        is_cur=0
         load=$(jf "@[$i].load"); station=$(jf "@[$i].station")
+        if [ "$station" = "$CUR_IP" ] || [ "$host" = "$CFG_HOST" ]; then is_cur=1; fi
+        # below the display cutoff only the current server's row is built
+        if [ "$i" -ge "$CANDIDATES" ] && [ "$is_cur" != "1" ]; then i=$((i + 1)); continue; fi
         city=$(jf "@[$i].locations[0].country.city.name")
         is_uint "$load" || load=""
         rtt=""
         [ -n "$station" ] && rtt=$(rtt_of "$station")
         [ -n "$rtt" ] && rtt_txt="$rtt ms" || rtt_txt="&#8211;"
         cls=""; chip=""
-        if [ "$station" = "$CUR_IP" ] || [ "$host" = "$CFG_HOST" ]; then
+        if [ "$is_cur" = "1" ]; then
             CUR_HOST="$host"; CUR_LOAD="$load"; CUR_RANK=$((i + 1))
             CUR_CITY="$city"; CUR_RTT="$rtt"
             cls=" class=\"cur\""; chip="<span class=\"chip me\">&#9664; current</span>"
+            [ "$i" -ge "$CANDIDATES" ] && cls=" class=\"cur below\""
         elif [ -z "$BEST_HOST" ] && [ -n "$load" ] && [ -n "$station" ]; then
             BEST_HOST="$host"; BEST_LOAD="$load"
             chip="%%BESTCHIP%%"
         fi
         [ -n "$load" ] && [ "$load" -ge "$LOAD_THRESHOLD" ] && barcls="hot" || barcls="cool"
-        ROWS="$ROWS<tr$cls><td class=\"rk\">$((i + 1))</td><td class=\"sv\">$(printf '%s' "$host" | esc)<span class=\"st\">$(printf '%s' "$station" | esc)</span></td><td class=\"ct\">$(printf '%s' "$city" | esc)</td><td class=\"ld\"><div class=\"bar\"><i class=\"$barcls\" style=\"width:${load:-0}%\"></i></div><span class=\"n $barcls\">${load:-?}%</span></td><td class=\"rt\">$rtt_txt</td><td class=\"vc\">$chip</td></tr>"
+        row="<tr$cls><td class=\"rk\">$((i + 1))</td><td class=\"sv\">$(printf '%s' "$host" | esc)<span class=\"st\">$(printf '%s' "$station" | esc)</span></td><td class=\"ct\">$(printf '%s' "$city" | esc)</td><td class=\"ld\"><div class=\"bar\"><i class=\"$barcls\" style=\"width:${load:-0}%\"></i></div><span class=\"n $barcls\">${load:-?}%</span></td><td class=\"rt\">$rtt_txt</td><td class=\"vc\">$chip</td></tr>"
+        if [ "$is_cur" = "1" ] && [ "$i" -ge "$CANDIDATES" ]; then
+            CUR_ROW="<tr class=\"gaprow\"><td colspan=\"6\">&#8942; not a switch target &mdash; ranked below the top $CANDIDATES</td></tr>$row"
+        else
+            ROWS="$ROWS$row"
+        fi
         i=$((i + 1))
     done
+    ROWS="$ROWS$CUR_ROW"
 fi
 
 # --- decision -----------------------------------------------------------------
@@ -216,7 +218,7 @@ else
     VERDICT="$CUR_HOST is over the line at ${CUR_LOAD}%, but the best candidate is not ${MIN_IMPROVEMENT} points better — holding."
 fi
 [ -n "$DWELL_LEFT" ] && VERDICT="$VERDICT Dwell guard: no automatic switch for another $DWELL_LEFT min."
-[ "$DRY_RUN" = "0" ] || VERDICT="$VERDICT Dry-run: decisions are only logged."
+[ "$DRY_RUN" = "1" ] && VERDICT="$VERDICT Dry-run: decisions are only logged."
 
 NEXT_CHIP=""
 [ "$WOULD" = "1" ] && NEXT_CHIP='<span class="chip next">next pick</span>'
@@ -241,18 +243,25 @@ ev_html() { # stdin: chronological log lines -> styled rows, newest first
         printf "<div class=\"ev %s\"><span class=\"t\">%s</span><span class=\"m\">%s</span></div>\n", cls, ts, msg
     }'
 }
-HIST=$(grep -E "SWITCHED|switching:|DRY-RUN|ROLLBACK|RECOVERY|CRITICAL|ERROR" "$LOG_FILE" 2>/dev/null | tail -n 15 | ev_html)
-ACT=$(tail -n 30 "$LOG_FILE" 2>/dev/null | ev_html)
+# dry-run chatter is only relevant while dry-run mode is active — in live mode
+# the timelines show real actions only
+if [ "$DRY_RUN" = "1" ]; then
+    HIST=$(grep -E "SWITCHED|switching:|DRY-RUN|ROLLBACK|RECOVERY|CRITICAL|ERROR" "$LOG_FILE" 2>/dev/null | tail -n 15 | ev_html)
+    ACT=$(tail -n 30 "$LOG_FILE" 2>/dev/null | ev_html)
+else
+    HIST=$(grep -E "SWITCHED|switching:|ROLLBACK|RECOVERY|CRITICAL|ERROR" "$LOG_FILE" 2>/dev/null | grep -v "DRY-RUN:" | tail -n 15 | ev_html)
+    ACT=$(grep -v "DRY-RUN:" "$LOG_FILE" 2>/dev/null | tail -n 30 | ev_html)
+fi
 
 # --- page fragments -----------------------------------------------------------
-if [ "$DRY_RUN" = "0" ]; then
-    BADGE='<span class="badge live">live</span>'
-    FORCE_LABEL="Force switch now"
-    FORCE_CONFIRM="Switch VPN server now? Family internet blips ~15 s."
-else
+if [ "$DRY_RUN" = "1" ]; then
     BADGE='<span class="badge dry">dry-run</span>'
     FORCE_LABEL="Force switch (dry-run: logs only)"
     FORCE_CONFIRM="Dry-run: this only writes a log line. Continue?"
+else
+    BADGE='<span class="badge live">live</span>'
+    FORCE_LABEL="Force switch now"
+    FORCE_CONFIRM="Switch VPN server now? Family internet blips ~15 s."
 fi
 if [ "$VPN_UP" = "yes" ]; then
     VPN_BADGE='<span class="badge up">vpn up</span>'
@@ -263,13 +272,13 @@ fi
 MSG=""
 case "$QUERY_STRING" in
     *msg=forced*) MSG="Forced switch triggered &mdash; the decision appears in the switch history below (page auto-refreshes)." ;;
-    *msg=saved*)  MSG="Config saved &mdash; next cycle uses the new values." ;;
+    *msg=saved*)  MSG="Settings saved &mdash; the candidate list is re-fetching with the new values right now." ;;
 esac
 
 NIGHTLY_CHECKED=""
 [ "$NIGHTLY_ROTATE" = "1" ] && NIGHTLY_CHECKED=" checked"
-LIVE_CHECKED=""
-[ "$DRY_RUN" = "0" ] && LIVE_CHECKED=" checked"
+MODE_LIVE_CHECKED=" checked"; MODE_DRY_CHECKED=""
+if [ "$DRY_RUN" = "1" ]; then MODE_LIVE_CHECKED=""; MODE_DRY_CHECKED=" checked"; fi
 
 COUNTRY_ESC=$(printf '%s' "$COUNTRY_NAME" | esc)
 HERO_HOST="${CUR_HOST:-$CUR_IP}"
@@ -406,17 +415,41 @@ tr.cur td{background:rgba(35,200,170,.10)}
 .empty{color:var(--dim);font-family:var(--mono);font-size:12.5px}
 details summary{cursor:pointer;color:var(--mut);font-size:13px}
 details[open] summary{margin-bottom:8px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}
 .f label{display:block;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
  color:var(--dim);font-weight:600;margin-bottom:4px}
 .f .hint{font-size:11px;color:var(--dim);margin-top:3px}
 input[type=number]{width:100%;background:var(--bg);color:var(--ink);
  border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:13px var(--mono)}
-.toggles{margin:14px 0 0}
-.toggles label{display:block;margin:6px 0;color:var(--mut)}
-.armbox{border:1px solid var(--amber);background:rgba(233,190,85,.13);
- border-radius:8px;padding:10px 12px;margin:12px 0}
-.armbox b{color:var(--ink)}
+.mode{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.seg{position:relative;display:block;cursor:pointer}
+.seg input{position:absolute;opacity:0}
+.segbody{display:block;height:100%;border:1px solid var(--line);border-radius:8px;
+ padding:9px 12px;background:var(--bg)}
+.segbody b{display:block;font-size:13px}
+.segbody small{display:block;color:var(--dim);font-size:11.5px;line-height:1.35;margin-top:2px}
+.seg input:checked+.segbody{border-color:var(--tealtx);box-shadow:inset 0 0 0 1px var(--tealtx)}
+.seg input:checked+.segbody b::after{content:"\25CF";float:right;font-size:9px;color:var(--tealtx)}
+.seg input[value=dry]:checked+.segbody{border-color:var(--ambertx);box-shadow:inset 0 0 0 1px var(--ambertx)}
+.seg input[value=dry]:checked+.segbody b::after{color:var(--ambertx)}
+.seg input:focus-visible+.segbody{outline:2px solid var(--tealtx);outline-offset:2px}
+.fs{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:12px}
+fieldset{border:1px solid var(--line);border-radius:8px;padding:10px 14px 12px;margin:0;min-width:0}
+legend{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);
+ font-weight:600;padding:0 6px}
+fieldset .f{margin:8px 0 10px}
+fieldset .f:last-child{margin-bottom:0}
+.unit{display:flex;align-items:stretch}
+.unit input[type=number]{flex:1;min-width:0;border-radius:6px 0 0 6px;border-right:0}
+.unit i{font:11px/1 var(--mono);font-style:normal;color:var(--dim);background:var(--soft);
+ border:1px solid var(--line);border-left:0;border-radius:0 6px 6px 0;
+ display:flex;align-items:center;padding:0 8px;white-space:nowrap}
+.nightly{display:block;color:var(--mut);margin:8px 0 3px}
+.policy{font:12.5px/1.5 var(--mono);color:var(--mut);background:var(--soft);
+ border-radius:8px;padding:9px 12px;margin:14px 0 12px;overflow-wrap:anywhere}
+.policy .pk{color:var(--dim)}
+.savebar{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+tr.gaprow td{color:var(--dim);font-size:11.5px;text-align:center;padding:5px 10px;border-bottom:0}
+tr.below td{border-top:1px dashed var(--dim)}
 button{background:var(--teal);color:#073226;border:0;border-radius:6px;
  padding:8px 16px;font:600 13px -apple-system,"Segoe UI",sans-serif;cursor:pointer}
 button.danger{background:var(--dbg);color:var(--dtx)}
@@ -455,14 +488,11 @@ $([ "$VPN_UP" = "yes" ] || echo '<div class="warnbox">VPN interface is DOWN or o
 $GAUGE
 <p class="verdict">$(printf '%s' "$VERDICT" | esc)</p>
 <div class="decfoot">
-<span class="note">policy: switch when load &#8805; ${LOAD_THRESHOLD}% and a candidate is ${MIN_IMPROVEMENT}+ points lower &middot; ${MIN_DWELL_MIN} min dwell$([ "$NIGHTLY_ROTATE" = "1" ] && echo " &middot; nightly fresh IP ~04:30")</span>
-$(if [ "$WRITES" = "1" ]; then cat <<FORCE
+<span class="note">policy: switch when load &#8805; ${LOAD_THRESHOLD}% and a candidate is ${MIN_IMPROVEMENT}+ points lower &middot; ${MIN_DWELL_MIN} min dwell$([ "$NIGHTLY_ROTATE" = "1" ] && echo " &middot; nightly fresh IP 04:15")</span>
 <form method="post" onsubmit="return confirm('$FORCE_CONFIRM')">
 <input type="hidden" name="action" value="force">
 <button class="danger">$FORCE_LABEL</button>
 </form>
-FORCE
-fi)
 </div>
 </div>
 <div class="panel">
@@ -480,32 +510,33 @@ else
     echo '<p class="empty">no candidate data yet &mdash; the rotator has not run since the last reboot.</p>'
 fi)
 </div>
-$(if [ "$WRITES" = "1" ]; then cat <<ACTIONS
 <div class="panel">
 <p class="eyebrow">settings</p>
-<form method="post" onsubmit="var c=this.LIVE_MODE;return !c||!c.checked||c.defaultChecked||confirm('Arm LIVE mode? The rotator will actually switch servers from the next cycle.')">
+<form method="post" id="cfgform">
 <input type="hidden" name="action" value="save">
-<div class="grid">
-<div class="f"><label>switch line</label><input type="number" name="LOAD_THRESHOLD" min="1" max="100" value="$LOAD_THRESHOLD"><div class="hint">switch when load &#8805; this %</div></div>
-<div class="f"><label>min improvement</label><input type="number" name="MIN_IMPROVEMENT" min="0" max="100" value="$MIN_IMPROVEMENT"><div class="hint">candidate must be this much lower</div></div>
-<div class="f"><label>dwell</label><input type="number" name="MIN_DWELL_MIN" min="0" max="1440" value="$MIN_DWELL_MIN"><div class="hint">minutes between switches</div></div>
-<div class="f"><label>country id</label><input type="number" name="COUNTRY_ID" min="1" max="999" value="$COUNTRY_ID"><div class="hint">81 = Germany</div></div>
-<div class="f"><label>candidates</label><input type="number" name="CANDIDATES" min="1" max="30" value="$CANDIDATES"><div class="hint">servers fetched per cycle</div></div>
+<div class="mode" role="radiogroup" aria-label="rotator mode">
+<label class="seg"><input type="radio" name="MODE" value="live"$MODE_LIVE_CHECKED><span class="segbody"><b>Live</b><small>switches servers for real &mdash; the normal mode</small></span></label>
+<label class="seg"><input type="radio" name="MODE" value="dry"$MODE_DRY_CHECKED><span class="segbody"><b>Dry-run</b><small>logs every decision, touches nothing &mdash; for testing</small></span></label>
 </div>
-<div class="toggles">
-<label><input type="checkbox" name="NIGHTLY_ROTATE" value="1"$NIGHTLY_CHECKED> nightly rotation &mdash; fresh IP every night ~04:30</label>
+<div class="fs">
+<fieldset><legend>when to switch</legend>
+<div class="f"><label for="in-th">switch line</label><span class="unit"><input id="in-th" type="number" name="LOAD_THRESHOLD" min="1" max="100" value="$LOAD_THRESHOLD"><i>%</i></span><div class="hint">switch when the current load reaches this</div></div>
+<div class="f"><label for="in-imp">min improvement</label><span class="unit"><input id="in-imp" type="number" name="MIN_IMPROVEMENT" min="0" max="100" value="$MIN_IMPROVEMENT"><i>pts</i></span><div class="hint">a candidate must be this much lower</div></div>
+<div class="f"><label for="in-dw">dwell</label><span class="unit"><input id="in-dw" type="number" name="MIN_DWELL_MIN" min="0" max="1440" value="$MIN_DWELL_MIN"><i>min</i></span><div class="hint">quiet time between switches</div></div>
+</fieldset>
+<fieldset><legend>server pool</legend>
+<div class="f"><label for="in-cc">country</label><span class="unit"><input id="in-cc" type="number" name="COUNTRY_ID" min="1" max="999" value="$COUNTRY_ID"><i>id</i></span><div class="hint">81 = Germany &middot; list: api.nordvpn.com/v1/servers/countries</div></div>
+<div class="f"><label for="in-cand">switch targets</label><span class="unit"><input id="in-cand" type="number" name="CANDIDATES" min="1" max="30" value="$CANDIDATES"><i>servers</i></span><div class="hint">top of NordVPN's ranking; the current server stays tracked even below this</div></div>
+</fieldset>
+<fieldset><legend>fresh ip</legend>
+<label class="nightly"><input type="checkbox" name="NIGHTLY_ROTATE" value="1"$NIGHTLY_CHECKED> rotate every night at 04:15</label>
+<div class="hint">a new address daily, while nobody is online &mdash; ages out website blocks</div>
+</fieldset>
 </div>
-<div class="armbox">
-<label><input type="checkbox" name="LIVE_MODE" value="1"$LIVE_CHECKED> <b>LIVE mode</b> &mdash; actually switch servers. Off = dry-run: decisions are logged, nothing is touched.</label>
-</div>
-<button>Save changes</button>
-<span class="note" style="margin-left:10px">country ids: api.nordvpn.com/v1/servers/countries</span>
+<p class="policy" id="polwrap" data-cid="$COUNTRY_ID" data-cname="$COUNTRY_ESC" aria-live="polite"><span class="pk">policy &#8594;</span> <span id="pol"></span></p>
+<div class="savebar"><button>Save changes</button><span class="note">saving re-fetches the candidate list within seconds</span></div>
 </form>
 </div>
-ACTIONS
-else
-    echo '<p class="note">controls disabled &mdash; no /etc/rotator-dash.secret on the router (see README, &ldquo;Dashboard&rdquo;)</p>'
-fi)
 <div class="panel">
 <p class="eyebrow">switch history &middot; newest first</p>
 ${HIST:-<p class=empty>(no switches or dry-run announcements yet)</p>}
@@ -527,6 +558,21 @@ function themeFlip(){var h=document.documentElement,
  try{localStorage.setItem('nvrTheme',t)}catch(e){}
  themeIcon()}
 themeIcon();
+function polText(){
+ var f=document.getElementById('cfgform'); if(!f)return;
+ var w=document.getElementById('polwrap');
+ var cc=f.COUNTRY_ID.value;
+ var country=(cc===w.getAttribute('data-cid')&&w.getAttribute('data-cname'))
+  ?w.getAttribute('data-cname'):('country '+cc);
+ document.getElementById('pol').textContent=
+  'switch when load ≥ '+f.LOAD_THRESHOLD.value+'% and a candidate is '
+  +f.MIN_IMPROVEMENT.value+'+ pts lower · '+f.MIN_DWELL_MIN.value
+  +' min dwell · top '+f.CANDIDATES.value+' of '+country
+  +(f.NIGHTLY_ROTATE.checked?' · fresh IP nightly 04:15':'')
+  +(f.MODE.value==='dry'?' · DRY-RUN: log only':' · LIVE');
+}
+(function(){var f=document.getElementById('cfgform');
+ if(f){f.addEventListener('input',polText);f.addEventListener('change',polText);polText();}})();
 (function(){
  function tick(){
   var e=document.activeElement;
