@@ -1,0 +1,39 @@
+# CI — the two checks the main-branch ruleset requires by name:
+#   "PR targets a legal base"  guards the branch flow (features -> dev, dev -> main)
+#   "build"                    runs the full mock-router test suite
+name: ci
+
+on:
+  pull_request:
+
+jobs:
+  legal-base:
+    name: PR targets a legal base
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Enforce the branch flow
+        env:
+          BASE: ${{ github.base_ref }}
+          HEAD: ${{ github.head_ref }}
+        run: |
+          if [ "$BASE" = "dev" ]; then
+            echo "OK: PR into dev"
+          elif [ "$BASE" = "main" ] && [ "$HEAD" = "dev" ]; then
+            echo "OK: release PR dev -> main"
+          else
+            echo "PRs must target dev; main only accepts release PRs from dev (got $HEAD -> $BASE)"
+            exit 1
+          fi
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Run the mock-router test suite
+        run: sh test/run-local.sh
