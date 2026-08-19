@@ -116,14 +116,17 @@ press the buttons through your browser.)
 
 What you're looking at, top to bottom:
 
+- **Top bar** — the mode and VPN badges, the theme toggle, and the
+  **Switch to best server** button: one press moves the tunnel to the top
+  candidate for a fresh IP (in dry-run mode it only logs, and the button
+  says so).
 - **Current server** — hostname, city, load, its load rank, round-trip
-  time, handshake age, last switch — and the **Force switch** button for a
-  fresh IP on demand.
+  time, handshake age, last switch.
 - **Candidates** — NordVPN's recommendation pool **sorted by load, best
   first** (ties keep NordVPN's order), cut to as many rows as your
   switch-target setting. The rotate script sorts exactly the same way and
-  picks the top non-current row, so what a force switch takes is always the
-  first candidate you see. The RTT is pinged from the router itself once
+  picks the top non-current row, so what a forced switch takes is always
+  the first candidate you see. The RTT is pinged from the router itself once
   per cycle. If the current server ranks below the displayed targets it's
   appended at the bottom with its real rank, so it never disappears from
   the board.
@@ -131,7 +134,8 @@ What you're looking at, top to bottom:
   nightly rotation, with a live one-line preview of the policy you're about
   to save. Saving shows an animated "applying" banner and the page polls
   itself until the re-fetched candidate list lands (a few seconds) — same
-  for Force switch, which reports back when the switch has finished.
+  for **Switch to best server**, which reports back when the switch has
+  finished.
 - **Switch history / recent activity** — the log, colour-coded, newest
   first. Dry-run chatter appears only while dry-run mode is active.
 

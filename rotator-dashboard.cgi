@@ -261,14 +261,20 @@ else
 fi
 
 # --- page fragments -----------------------------------------------------------
+# The one action on the page: same name as the flow it starts ("Switching
+# servers…" banner -> "SWITCHED" history line). The sub-label carries the
+# outcome and the cost; the accent flips to amber while dry-run is active.
+FORCE_LABEL="Switch to best server"
 if [ "$DRY_RUN" = "1" ]; then
     BADGE='<span class="badge dry">dry-run</span>'
-    FORCE_LABEL="Force switch (dry-run: logs only)"
+    FORCE_SUB="dry-run: logs only"
     FORCE_CONFIRM="Dry-run: this only writes a log line. Continue?"
+    CTA_CLS=" dry"
 else
     BADGE='<span class="badge live">live</span>'
-    FORCE_LABEL="Force switch now"
-    FORCE_CONFIRM="Switch VPN server now? Family internet blips ~15 s."
+    FORCE_SUB="fresh IP now &middot; ~15 s blip"
+    FORCE_CONFIRM="Switch to the best server now? Family internet blips ~15 s."
+    CTA_CLS=""
 fi
 if [ "$VPN_UP" = "yes" ]; then
     VPN_BADGE='<span class="badge up">vpn up</span>'
@@ -378,7 +384,18 @@ body{margin:0;padding:16px 14px 40px;background:var(--bg);color:var(--ink);
 .topbar{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
 .brand{font-weight:700;letter-spacing:.02em}
 .brand b{color:var(--tealtx)}
+.topact{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 .badges{display:flex;gap:6px;align-items:center}
+.cta{display:inline-flex;align-items:center;gap:10px;background:var(--teal);color:#073226;
+ border:0;border-radius:999px;padding:7px 17px 7px 13px;cursor:pointer;text-align:left;
+ font:inherit;transition:filter .15s,transform .1s}
+.cta .swap{font-size:17px;font-style:normal;line-height:1}
+.cta .ctatext b{display:block;font-size:13px;line-height:1.2;letter-spacing:.01em}
+.cta .ctatext small{display:block;font-size:10.5px;line-height:1.3;opacity:.78}
+.cta:hover{filter:brightness(1.07)}
+.cta:active{transform:translateY(1px)}
+.cta.dry{background:var(--amber);color:#4A3608}
+@media (prefers-reduced-motion:reduce){.cta{transition:none}}
 .badge{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;
  padding:3px 10px;border-radius:999px}
 .badge.dry{background:var(--amber);color:#4A3608} .badge.live{background:var(--teal);color:#073226}
@@ -399,9 +416,6 @@ h1{font:600 26px/1.2 var(--mono);margin:2px 0 6px;word-break:break-all}
 .sub{color:var(--mut);font-size:15px}
 .facts{color:var(--dim);font-size:12.5px;margin-top:10px;font-family:var(--mono)}
 .hs.good{color:var(--tealtx)} .hs.warn{color:var(--ambertx)} .hs.bad{color:var(--redtx)}
-.hero{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}
-.heroinfo{min-width:0}
-.forcebox{flex:none;margin-top:4px}
 .board{overflow-x:auto}
 table{border-collapse:collapse;width:100%}
 th{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);
@@ -476,7 +490,6 @@ tr.gaprow td{color:var(--dim);font-size:11.5px;text-align:center;padding:5px 10p
 tr.below td{border-top:1px dashed var(--dim)}
 button{background:var(--teal);color:#073226;border:0;border-radius:6px;
  padding:8px 16px;font:600 13px -apple-system,"Segoe UI",sans-serif;cursor:pointer}
-button.danger{background:var(--dbg);color:var(--dtx)}
 button.theme{background:transparent;color:var(--mut);border:1px solid var(--line);
  border-radius:999px;padding:2px 9px;font-size:13px;line-height:1.4}
 button:focus-visible,input:focus-visible,summary:focus-visible,a:focus-visible{
@@ -485,6 +498,8 @@ button:focus-visible,input:focus-visible,summary:focus-visible,a:focus-visible{
 .foot{color:var(--dim);font-size:12px;text-align:center}
 @media (max-width:620px){
  h1{font-size:20px}
+ .cta{padding:6px 14px 6px 11px}
+ .cta .ctatext small{display:none}
  .sv .st{display:none}
  .ct{display:none}
  .bar{display:none}
@@ -497,23 +512,21 @@ button:focus-visible,input:focus-visible,summary:focus-visible,a:focus-visible{
 </style></head><body><div class="wrap">
 <div class="topbar">
 <span class="brand">Nord<b>VPN</b> rotator${COUNTRY_ESC:+ &middot; <span class=note>$COUNTRY_ESC</span>}</span>
+<span class="topact">
+<form method="post" onsubmit="return confirm('$FORCE_CONFIRM')">
+<input type="hidden" name="action" value="force">
+<button class="cta$CTA_CLS"><i class="swap" aria-hidden="true">&#8644;</i><span class="ctatext"><b>$FORCE_LABEL</b><small>$FORCE_SUB</small></span></button>
+</form>
 <span class="badges">$BADGE $VPN_BADGE <button type="button" id="themebtn" class="theme" onclick="themeFlip()" aria-label="toggle light/dark theme">&#9790;</button></span>
+</span>
 </div>
 $MSG_HTML
 $([ "$VPN_UP" = "yes" ] || echo '<div class="warnbox">VPN interface is DOWN or off &mdash; the rotator leaves it alone while off.</div>')
 <div class="panel">
-<div class="hero">
-<div class="heroinfo">
 <p class="eyebrow">current server</p>
 <h1>$(printf '%s' "${HERO_HOST:-?}" | esc)</h1>
 <div class="sub">$HERO_SUB</div>
 <div class="facts">endpoint $(printf '%s' "${CUR_IP:-?}" | esc)$CFG_NOTE &middot; handshake <span class="hs $HS_CLS">$HS_TEXT</span> &middot; last switch $LAST_SWITCH</div>
-</div>
-<form method="post" class="forcebox" onsubmit="return confirm('$FORCE_CONFIRM')">
-<input type="hidden" name="action" value="force">
-<button class="danger">$FORCE_LABEL</button>
-</form>
-</div>
 </div>
 <div class="panel$BOARD_CLS">
 <p class="eyebrow">candidates &middot; sorted by load, best first$FRESH_NOTE</p>
