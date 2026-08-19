@@ -37,10 +37,15 @@ Every 30 minutes, cron runs one decision cycle:
 
 1. Fetch NordVPN's recommended servers for your country. Public API, no
    account or token needed.
-2. Find your current server in that list.
+2. Find your current server in that list. If it's not there, that alone means
+   nothing — NordVPN rotates which ~20 servers the API surfaces — so the
+   script looks it up in a much deeper top-100 probe before drawing any
+   conclusion.
 3. Switch only when the current server is at or above the load threshold
-   (default 60%) **and** some candidate is at least 15 points lower. Having
-   dropped out of the recommended list entirely also counts as a reason.
+   (default 60%) **and** some candidate is at least 15 points lower. Being
+   truly delisted also counts as a reason, but only after the deep probe
+   misses it on two consecutive cycles — a single miss is just the API
+   shuffling its answer.
 4. Health-check the new tunnel (WireGuard handshake plus a ping through it).
    If it doesn't come up, roll back to the old server automatically.
 
@@ -49,12 +54,18 @@ between switches (default 60 min), the minimum-improvement requirement, and a
 cooldown after any failed attempt. A marker file on flash survives reboots,
 so a switch interrupted halfway gets repaired on the next cycle.
 
+On top of the load policy, a **nightly rotation** (on by default) grabs a
+fresh IP at 04:15 every night regardless of load — websites sometimes block
+a shared VPN address, and a daily change ages that out while nobody is
+online.
+
 It never touches your WireGuard private key, DNS, MTU, or the kill switch.
 The only thing it ever rewrites is the peer's endpoint and public key — the
 same change you'd make by clicking a different server in the GL panel.
 
-And it installs in **dry-run mode**: it logs what it *would* do and touches
-nothing until you deliberately arm it.
+It runs **live by default**. If you'd rather watch it think first, the
+dashboard has a dry-run mode that logs every decision without touching the
+tunnel — meant for testing, not as a permanent state.
 
 ## Requirements
 
@@ -82,51 +93,56 @@ ssh root@192.168.8.1 "sh /tmp/nvr/install.sh && /usr/bin/nordvpn-rotate.sh check
 
 `check` is a read-only pre-flight that verifies every assumption on your
 router (tools present, interface up, peer section found, API reachable) and
-prints OK/WARN/FAIL for each. Nothing is switched yet — the shipped config
-has `DRY_RUN=1`.
+prints OK/WARN/FAIL for each.
 
-Now let it run for a couple of days and read its diary:
+The rotator starts working right away — live mode is the default. Read its
+diary anytime:
 
 ```bash
 ssh root@192.168.8.1 "tail -f /tmp/nordvpn-rotate.log"
 ```
 
-Lines like `OK: de1478... load 23% (rank 2 of 20)` mean it's happy. Lines
-like `DRY-RUN: would switch ...` show what it would have done and why. When
-those decisions look sensible to you, arm it.
+Lines like `OK: de1478... load 23% (rank 2 of 20)` mean it's happy and doing
+nothing. A `SWITCHED:` line every few days is normal.
 
-## Going live
+## Testing first (optional dry-run)
 
-Either set `DRY_RUN=0` in `/etc/nordvpn-rotate.conf`, or do it from the
-dashboard. The dashboard is read-only until you give it a password:
-
-```bash
-ssh root@192.168.8.1 'umask 077; echo "CHOOSE-A-PASSWORD" > /etc/rotator-dash.secret'
-```
-
-After that, `http://192.168.8.1/cgi-bin/rotator` asks for HTTP Basic login
-(user `admin` by default — set `DASH_USER` in the conf to change it) and you
-get the Force button plus every setting, including the LIVE-mode checkbox.
-No secret file, no writes: every button press is refused server-side, so a
-fresh install can't be clicked into switching servers by whoever is on your
-LAN. Deleting the secret file returns the page to read-only.
+If you'd rather watch before letting it act: open the dashboard, pick
+**Dry-run** in Settings, save. Every decision is then only logged as
+`DRY-RUN: would switch ...` and the tunnel is never touched. Flip back to
+**Live** when the decisions look sensible. Dry-run log lines are only shown
+on the dashboard while dry-run mode is active.
 
 ## The dashboard
 
+`http://192.168.8.1/cgi-bin/rotator` — no login, it's your LAN. (Cross-site
+requests from the internet are still rejected, so a malicious page can't
+press the buttons through your browser.)
+
 What you're looking at, top to bottom:
 
-- **Current server** — hostname, city, load, its rank in NordVPN's list,
-  round-trip time, handshake age, last switch.
-- **Decision** — a gauge with the current server, the best candidate, and
-  the switch line, plus one sentence saying exactly what the rotator will do
-  next and why. If it says "Holding", nothing moves.
-- **Candidates** — NordVPN's recommended servers in their ranking order,
-  with load and RTT. The RTT is pinged from the router itself once per
-  cycle. The current server is reached directly while the others are
-  measured through the tunnel, so treat the column as a sanity check, not a
-  benchmark.
+- **Top bar** — the mode and VPN badges, the theme toggle, and the
+  **Switch to best server** button: one press moves the tunnel to the top
+  candidate for a fresh IP (in dry-run mode it only logs, and the button
+  says so).
+- **Current server** — hostname, city, load, its load rank, round-trip
+  time, handshake age, last switch.
+- **Candidates** — NordVPN's recommendation pool **sorted by load, best
+  first** (ties keep NordVPN's order), cut to as many rows as your
+  switch-target setting. The rotate script sorts exactly the same way and
+  picks the top non-current row, so what a forced switch takes is always
+  the first candidate you see. The RTT is pinged from the router itself once
+  per cycle. If the current server ranks below the displayed targets it's
+  appended at the bottom with its real rank, so it never disappears from
+  the board.
+- **Settings** — mode (Live / Dry-run), the switch policy, server pool and
+  nightly rotation, with a live one-line preview of the policy you're about
+  to save. Saving shows an animated "applying" banner and the page polls
+  itself until the re-fetched candidate list lands (a few seconds) — same
+  for **Switch to best server**, which reports back when the switch has
+  finished.
 - **Switch history / recent activity** — the log, colour-coded, newest
-  first.
+  first. Dry-run chatter appears only while dry-run mode is active.
 
 The moon/sun button toggles dark and light mode; the choice sticks per
 browser. The page refreshes itself every 60 seconds but politely waits while
@@ -135,19 +151,23 @@ you're typing in a settings field.
 ## Configuration
 
 Everything lives in `/etc/nordvpn-rotate.conf` (shell syntax) and is also
-editable from the dashboard once the secret exists.
+editable from the dashboard.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `DRY_RUN` | `1` | 1 = log only. Only the exact value `0` arms it; typos stay dry. |
+| `DRY_RUN` | `0` | 0 = live (default). 1 = log decisions only — testing mode. |
 | `COUNTRY_ID` | `81` | NordVPN country id (81 = Germany). List: `api.nordvpn.com/v1/servers/countries` |
 | `LOAD_THRESHOLD` | `60` | Switch when the current server's load reaches this % |
 | `MIN_IMPROVEMENT` | `15` | ...and a candidate is at least this many points lower |
 | `MIN_DWELL_MIN` | `60` | Never switch again within this many minutes |
-| `CANDIDATES` | `20` | How many recommended servers to fetch |
-| `NIGHTLY_ROTATE` | `0` | 1 = also rotate every night ~04:30 for a fresh IP |
+| `CANDIDATES` | `20` | How many top-ranked servers are switch targets (min. 20 are always fetched so the current server stays tracked) |
+| `NIGHTLY_ROTATE` | `1` | 1 = rotate every night at 04:15 for a fresh IP (default on) |
 | `WG_IFACE` | `wgclient` | WireGuard client interface (`wgclient1` on the XE3000) |
-| `DASH_USER` | `admin` | Dashboard login name |
+| `PROBE_LIMIT` | `100` | Depth of the delist probe — how far down the recommendations the current server may sit before it counts as missing |
+| `MISS_LIMIT` | `2` | Consecutive probe misses before "delisted" becomes a switch reason |
+
+A bad (non-numeric) value in any numeric key silently falls back to the
+default — the engine and the dashboard both refuse to act on garbage.
 
 ## Commands
 
@@ -155,20 +175,26 @@ editable from the dashboard once the secret exists.
 nordvpn-rotate.sh run      # one decision cycle (what cron calls)
 nordvpn-rotate.sh force    # switch to the best candidate NOW (fresh IP)
 nordvpn-rotate.sh nightly  # like force, but only if NIGHTLY_ROTATE=1
+nordvpn-rotate.sh refresh  # re-fetch candidates/latency only, switch nothing
 nordvpn-rotate.sh check    # read-only pre-flight, run this first
 nordvpn-rotate.sh status   # current server, last switch, recent log
 ```
 
 `force` skips the load and dwell gates but keeps the health check and
-rollback, and it respects dry-run.
+rollback, and it respects dry-run. `force` and `nightly` also wait for a
+running cycle to finish instead of silently giving up, take a loaded
+candidate rather than skip the fresh IP, and reuse a candidate list newer
+than 10 minutes — so a forced switch takes exactly the server the dashboard
+was showing, and starts immediately.
 
 ## Testing
 
 `test/run-local.sh` runs the real scripts on a normal PC with every router
-command mocked (`uci`, `ubus`, `wg`, `ping`, ...) — 74 checks covering the
-switch logic, rollback, recovery after interrupted switches, the dashboard
-rendering, and the dashboard's auth. It runs fine in Git Bash on Windows;
-you need `python` and `openssl` on the PATH.
+command mocked (`uci`, `ubus`, `wg`, `ping`, ...) — a lean suite covering the
+switch logic, rollback, recovery after interrupted switches, the lock
+collision, small candidate counts, and the dashboard rendering and POST
+handling. It runs fine in Git Bash on Windows; you need `python` on the
+PATH.
 
 ```bash
 sh test/run-local.sh

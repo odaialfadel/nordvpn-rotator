@@ -40,7 +40,7 @@ Priority: optional
 Description: Load-threshold NordVPN WireGuard server rotation for GL.iNet 4.x.
  Cron runs one decision cycle every 30 min and switches the peer endpoint
  only when the current server is overloaded or dropped from NordVPN's
- recommendations. Ships with DRY_RUN=1 (log-only) until configured.
+ recommendations, plus an optional nightly fresh-IP rotation at 04:15.
 EOF
 for f in postinst prerm postrm conffiles; do
     sed 's/\r$//' "$ROOT/package/$f" > "$BUILD/control/$f"
