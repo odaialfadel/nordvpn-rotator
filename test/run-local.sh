@@ -290,6 +290,13 @@ sh "$ROOT/rotator-dashboard.cgi" > "$DASH" 2>"$NVR_TEST_DIR/dash.err"
 check "renders without state" "no candidate data yet" "$DASH"
 check_absent "no shell errors on empty state" "." "$NVR_TEST_DIR/dash.err"
 
+echo "=== 13b2. COUNTRY_ID absent from conf -> dashboard still defaults it (was rendering blank)"
+reset "$S0" "$SAMPLE_URL" ""
+sed -i '/^COUNTRY_ID/d' "$NVR_CONF"
+sh "$ROOT/rotator-dashboard.cgi" > "$DASH" 2>"$NVR_TEST_DIR/dash.err"
+check "country field defaults instead of rendering blank" 'name="COUNTRY_ID"[^>]*value="81"' "$DASH"
+check_absent "no shell errors" "." "$NVR_TEST_DIR/dash.err"
+
 echo "=== 13c. dashboard POST: save config (no auth layer — LAN page)"
 post() { # $1 body, $2 referer override
     printf '%s' "$1" | REQUEST_METHOD=POST CONTENT_LENGTH=$(printf '%s' "$1" | wc -c) \
