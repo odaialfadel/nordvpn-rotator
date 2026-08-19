@@ -37,7 +37,9 @@ for s in allhot: s["load"] = 90
 json.dump(allhot, open(sys.argv[2] + "/reco-allhot.json", "w"))
 PYEOF
 
-S0=$(jsonfilter -i "$SAMPLE" -e '@[0].station')   # best-ranked server's IP
+S0=$(jsonfilter -i "$SAMPLE" -e '@[0].station')   # NordVPN's rank-1 server (load 5% -> load-rank 3)
+SB_ST=$(jsonfilter -i "$SAMPLE" -e '@[3].station')    # lowest load in the sample (4%) — what the picker takes
+SB_HOST=$(jsonfilter -i "$SAMPLE" -e '@[3].hostname')
 LOG="$NVR_TEST_DIR/rotate.log"
 pass=0; fail=0
 
@@ -99,7 +101,7 @@ check_gone() { # label, file that must NOT exist
 echo "=== 1. current server healthy and recommended -> no action"
 reset "$S0" "$SAMPLE_URL" ""
 sh "$SCRIPT" run
-check "logs OK / no switch" "^.* OK: de.*rank 1" "$LOG"
+check "logs OK / no switch (load-sorted rank)" "^.* OK: de.*rank 3 of 20" "$LOG"
 check_absent "no uci writes" "uci set" "$NVR_TEST_DIR/actions.log"
 check "latency cache written for rank-1 station" "^$S0 23" "$NVR_TEST_DIR/state/latency"
 
@@ -119,14 +121,14 @@ reset "203.0.113.99" "$ALLHOT_URL" ""
 sh "$SCRIPT" run
 check "holds when all hot" "HOLD:.*also loaded" "$LOG"
 
-echo "=== 5. DRY_RUN=0, healthy -> real switch via uci + bounce"
+echo "=== 5. DRY_RUN=0, healthy -> real switch via uci + bounce (lowest-load pick)"
 reset "203.0.113.99" "$SAMPLE_URL" "DRY_RUN=0"
 sh "$SCRIPT" run
 check "switch logged" "SWITCHED: now on" "$LOG"
-check "endpoint updated" "end_point=$S0:51820" "$NVR_TEST_DIR/uci.env"
+check "endpoint updated to the lowest-load server" "end_point=$SB_ST:51820" "$NVR_TEST_DIR/uci.env"
 check "pubkey updated" "public_key=3ZNjosvvIqfvu3" "$NVR_TEST_DIR/uci.env"
 check "tunnel bounced" "ifup wgclient" "$NVR_TEST_DIR/actions.log"
-check "GL panel label synced to new server" "name=de1478.nordvpn.com" "$NVR_TEST_DIR/uci.env"
+check "GL panel label synced to new server" "name=$SB_HOST" "$NVR_TEST_DIR/uci.env"
 check "GL panel location synced" "location=Germany,Berlin" "$NVR_TEST_DIR/uci.env"
 check_gone "switch marker cleared after success" "$NVR_TEST_DIR/state/prev"
 
@@ -175,7 +177,7 @@ echo "=== 9. hostname-form endpoint (the real router's state) + live wg endpoint
 reset "frankfurt.de.wg.nordhold.net" "$SAMPLE_URL" ""
 echo "$S0:51820" > "$NVR_TEST_DIR/live_ep"
 sh "$SCRIPT" run
-check "current server identified via live endpoint" "OK: de.*rank 1" "$LOG"
+check "current server identified via live endpoint" "OK: de.*rank 3" "$LOG"
 check_absent "no spurious switch" "would switch" "$LOG"
 
 echo "=== 10. hostname-form endpoint, no live endpoint available -> normalizing switch announced"
@@ -184,19 +186,19 @@ rm -f "$NVR_TEST_DIR/live_ep"
 sh "$SCRIPT" run
 check "falls back to config host + would normalize" "DRY-RUN: would switch frankfurt.de.wg.nordhold.net" "$LOG"
 
-echo "=== 11. best candidate missing its public key -> skipped, next candidate used"
+echo "=== 11. best candidate missing its public key -> skipped, next-best by load used"
 python - "$SAMPLE" "$NVR_TEST_DIR" <<'PYEOF'
 import json, sys
 d = json.load(open(sys.argv[1], encoding="utf-8"))
 broken = json.loads(json.dumps(d))
-broken[0]["technologies"] = []
+broken[3]["technologies"] = []   # index 3 = the lowest-load pick
 json.dump(broken, open(sys.argv[2] + "/reco-nopub.json", "w"))
 PYEOF
 if command -v cygpath >/dev/null 2>&1; then NOPUB_URL="file:///$(cygpath -m "$NVR_TEST_DIR/reco-nopub.json")"; else NOPUB_URL="file://$NVR_TEST_DIR/reco-nopub.json"; fi
-H1=$(jsonfilter -i "$SAMPLE" -e '@[1].hostname')
+H19=$(jsonfilter -i "$SAMPLE" -e '@[19].hostname')   # second-lowest load (also 4%)
 reset "203.0.113.99" "$NOPUB_URL" ""
 sh "$SCRIPT" run
-check "half-parsed candidate skipped, next taken" "would switch 203.0.113.99 -> $H1" "$LOG"
+check "half-parsed candidate skipped, next taken" "would switch 203.0.113.99 -> $H19" "$LOG"
 
 echo "=== 12. DRY_RUN typo (yes) -> noted, treated as live (live is the default mode)"
 reset "203.0.113.99" "$SAMPLE_URL" "DRY_RUN=yes"
@@ -209,7 +211,7 @@ reset "203.0.113.99" "$SAMPLE_URL" ""
 sed -i '/^DRY_RUN=/d' "$NVR_CONF"
 sh "$SCRIPT" run
 check "default is live" "SWITCHED: now on" "$LOG"
-check "endpoint really written" "end_point=$S0:51820" "$NVR_TEST_DIR/uci.env"
+check "endpoint really written" "end_point=$SB_ST:51820" "$NVR_TEST_DIR/uci.env"
 
 echo "=== 12b. force in dry-run -> announces, ignores dwell, touches nothing"
 reset "$S0" "$SAMPLE_URL" ""
@@ -219,12 +221,11 @@ check "forced dry-run announce despite dwell" "DRY-RUN: would switch.*forced swi
 check_absent "force in dry-run touches nothing" "uci set" "$NVR_TEST_DIR/actions.log"
 
 echo "=== 12c. force live -> switches even though current server is fine"
-S1=$(jsonfilter -i "$SAMPLE" -e '@[1].station')
 reset "$S0" "$SAMPLE_URL" "DRY_RUN=0"
 sh "$SCRIPT" force
 check "forced switch executed" "SWITCHED: now on" "$LOG"
 check "forced reason logged" "forced switch (manual)" "$LOG"
-check "moved off the healthy rank-1 server" "end_point=$S1:51820" "$NVR_TEST_DIR/uci.env"
+check "moved to the lowest-load candidate" "end_point=$SB_ST:51820" "$NVR_TEST_DIR/uci.env"
 
 echo "=== 12d. nightly is ON by default, honors an explicit off"
 reset "$S0" "$SAMPLE_URL" ""
@@ -253,12 +254,21 @@ rm -f "$LOG"
 sh "$SCRIPT" force
 check "forced run proceeds once the lock is free" "forced switch (manual)" "$LOG"
 
-echo "=== 12g. CANDIDATES=5: current server at rank 7 stays visible to the engine"
-S6=$(jsonfilter -i "$SAMPLE" -e '@[6].station')
+echo "=== 12g. CANDIDATES=5: current server below the window stays visible to the engine"
+S6=$(jsonfilter -i "$SAMPLE" -e '@[6].station')   # load-rank 6 -> below a top-5 window
 reset "$S6" "$SAMPLE_URL" "CANDIDATES=5"
 sh "$SCRIPT" run
-check "current matched beyond the target window" "rank 7 of 20" "$LOG"
+check "current matched beyond the target window" "rank 6 of 20" "$LOG"
 check_absent "no bogus not-recommended switch" "not matched in top" "$LOG"
+
+echo "=== 12i. force reuses a fresh candidate list — the pick comes from what the dashboard shows"
+reset "$S0" "$SAMPLE_URL" ""
+sh "$SCRIPT" run
+rm -f "$LOG"
+mkconf "file:///nonexistent-nvr-reuse-test.json" ""   # a fetch would fail loudly
+sh "$SCRIPT" force
+check "fresh list reused instead of fetched" "force: reusing the candidate list" "$LOG"
+check "decision made from the reused list" "DRY-RUN: would switch" "$LOG"
 
 echo "=== 12h. refresh: re-fetches candidate data, decides nothing"
 reset "$S0" "$SAMPLE_URL" ""
@@ -351,15 +361,16 @@ echo "=== 13f. dashboard: cross-site POSTs still rejected (the only gate left)"
 post "action=force" "http://evil.example/attack" > "$NVR_TEST_DIR/post.out"
 check "foreign referer -> 403" "403" "$NVR_TEST_DIR/post.out"
 
-echo "=== 13g. dashboard: CANDIDATES=5 keeps the current server on the board (rank 7)"
+echo "=== 13g. dashboard: CANDIDATES=5 keeps the current server on the board (load-rank 6)"
 reset "$S6" "$SAMPLE_URL" "CANDIDATES=5"
 sh "$SCRIPT" run
 sh "$ROOT/rotator-dashboard.cgi" > "$DASH" 2>"$NVR_TEST_DIR/dash.err"
 H6=$(jsonfilter -i "$SAMPLE" -e '@[6].hostname')
 check "current row appended below the cutoff" "not a switch target" "$DASH"
 check "current server still shown + marked" "$H6" "$DASH"
-check "real rank kept on the appended row" ">7<" "$DASH"
+check "real load-rank kept on the appended row" ">6<" "$DASH"
 check "verdict knows the current load" "under the 60% switch line" "$DASH"
+check "board is sorted by load (lowest-load server first)" ">1</td><td class=\"sv\">$SB_HOST" "$DASH"
 check_absent "no shell errors with a small candidate count" "." "$NVR_TEST_DIR/dash.err"
 
 echo "=== 13h. dashboard: dry-run log lines only show in dry-run mode"
@@ -371,6 +382,33 @@ check_absent "live mode hides dry-run chatter" "DRY-RUN: would switch" "$DASH"
 sed -i 's/^DRY_RUN=0/DRY_RUN=1/' "$NVR_CONF"
 sh "$ROOT/rotator-dashboard.cgi" > "$DASH" 2>/dev/null
 check "dry-run mode shows its own announcements" "DRY-RUN: would switch" "$DASH"
+
+echo "=== 13i. save feedback: applying banner polls until the fresh list lands, warns on timeout"
+reset "$S0" "$SAMPLE_URL" ""
+sh "$SCRIPT" run     # reco.json now exists with a current mtime
+NOWT=$(date +%s)
+QUERY_STRING="msg=saved&t=1" sh "$ROOT/rotator-dashboard.cgi" > "$DASH" 2>/dev/null
+check "data newer than the save -> applied" "Settings applied" "$DASH"
+QUERY_STRING="msg=saved&t=$((NOWT + 30))" sh "$ROOT/rotator-dashboard.cgi" > "$DASH" 2>/dev/null
+check "data older than the save -> applying banner" "Applying new settings" "$DASH"
+check "applying page polls itself" 'http-equiv="refresh" content="3"' "$DASH"
+check "board dimmed while applying" "panel stale-dim" "$DASH"
+touch -d '2020-01-01' "$NVR_TEST_DIR/state/reco.json"
+QUERY_STRING="msg=saved&t=$((NOWT - 100))" sh "$ROOT/rotator-dashboard.cgi" > "$DASH" 2>/dev/null
+check "refresh never landed -> timeout warning" "has not finished after 45" "$DASH"
+
+echo "=== 13j. force feedback: waits while the run holds the lock, done when it reports back"
+reset "$S0" "$SAMPLE_URL" ""
+sh "$SCRIPT" run     # log exists with a current mtime
+NOWT=$(date +%s)
+mkdir -p "$NVR_TEST_DIR/state/lock"
+QUERY_STRING="msg=forced&t=$((NOWT - 5))" sh "$ROOT/rotator-dashboard.cgi" > "$DASH" 2>/dev/null
+check "log written but run still busy -> keeps waiting" "Switching servers" "$DASH"
+rmdir "$NVR_TEST_DIR/state/lock"
+QUERY_STRING="msg=forced&t=$((NOWT - 5))" sh "$ROOT/rotator-dashboard.cgi" > "$DASH" 2>/dev/null
+check "run finished -> result message" "Forced switch finished" "$DASH"
+QUERY_STRING="msg=forced&t=$((NOWT + 30))" sh "$ROOT/rotator-dashboard.cgi" > "$DASH" 2>/dev/null
+check "run has not reported yet -> waiting banner + poll" 'http-equiv="refresh" content="3"' "$DASH"
 
 echo "==="
 echo "result: $pass passed, $fail failed"

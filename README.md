@@ -122,15 +122,19 @@ What you're looking at, top to bottom:
   the switch line, plus one sentence saying exactly what the rotator will do
   next and why. If it says "Holding", nothing moves. The **Force switch**
   button lives here too.
-- **Candidates** — the top of NordVPN's ranking (as many as your
-  switch-target setting), with load and RTT. The RTT is pinged from the
-  router itself once per cycle. If the current server ranks below the
-  displayed targets it's appended at the bottom with its real rank, so it
-  never disappears from the board.
+- **Candidates** — NordVPN's recommendation pool **sorted by load, best
+  first** (ties keep NordVPN's order), cut to as many rows as your
+  switch-target setting. The rotate script sorts exactly the same way and
+  picks the top non-current row, so what a force switch takes is always the
+  first candidate you see. The RTT is pinged from the router itself once
+  per cycle. If the current server ranks below the displayed targets it's
+  appended at the bottom with its real rank, so it never disappears from
+  the board.
 - **Settings** — mode (Live / Dry-run), the switch policy, server pool and
   nightly rotation, with a live one-line preview of the policy you're about
-  to save. Saving re-fetches the candidate list within seconds, so changes
-  show up immediately instead of on the next half-hour cycle.
+  to save. Saving shows an animated "applying" banner and the page polls
+  itself until the re-fetched candidate list lands (a few seconds) — same
+  for Force switch, which reports back when the switch has finished.
 - **Switch history / recent activity** — the log, colour-coded, newest
   first. Dry-run chatter appears only while dry-run mode is active.
 
@@ -167,13 +171,15 @@ nordvpn-rotate.sh status   # current server, last switch, recent log
 
 `force` skips the load and dwell gates but keeps the health check and
 rollback, and it respects dry-run. `force` and `nightly` also wait for a
-running cycle to finish instead of silently giving up, and they'll take a
-loaded candidate rather than skip the fresh IP.
+running cycle to finish instead of silently giving up, take a loaded
+candidate rather than skip the fresh IP, and reuse a candidate list newer
+than 10 minutes — so a forced switch takes exactly the server the dashboard
+was showing, and starts immediately.
 
 ## Testing
 
 `test/run-local.sh` runs the real scripts on a normal PC with every router
-command mocked (`uci`, `ubus`, `wg`, `ping`, ...) — 90 checks covering the
+command mocked (`uci`, `ubus`, `wg`, `ping`, ...) — 101 checks covering the
 switch logic, rollback, recovery after interrupted switches, the lock
 collision, small candidate counts, and the dashboard rendering and POST
 handling. It runs fine in Git Bash on Windows; you need `python` on the

@@ -213,21 +213,35 @@ cmd_run() {
     fi
     [ -n "$CUR_IP" ] || CUR_IP="$CFG_HOST"
 
-    if ! curl -g -fsS --max-time "$API_TIMEOUT" "$API_URL" -o "$RECO.new"; then
-        if tunnel_healthy; then
-            log "skipped: API fetch failed (tunnel is healthy — transient, will retry next cycle)"
-        else
-            log "WARNING: API fetch failed AND tunnel looks unhealthy — cannot pick a new server without the API; check GL panel"
+    # a forced/nightly run reuses a recent candidate list instead of fetching:
+    # the pick then comes from the exact list the dashboard is showing, and the
+    # switch starts immediately (no fetch + no latency probes first)
+    reuse=0
+    if [ -n "$FORCE_REASON" ] && [ -f "$RECO" ]; then
+        rt=$(date -r "$RECO" +%s 2>/dev/null)
+        if is_uint "$rt" && [ $(( $(date +%s) - rt )) -lt 600 ]; then
+            reuse=1
+            log "force: reusing the candidate list fetched $(( ( $(date +%s) - rt ) / 60 )) min ago (same list the dashboard shows)"
         fi
-        exit 0
     fi
-    mv "$RECO.new" "$RECO"
-    probe_latency
+    if [ "$reuse" != "1" ]; then
+        if ! curl -g -fsS --max-time "$API_TIMEOUT" "$API_URL" -o "$RECO.new"; then
+            if tunnel_healthy; then
+                log "skipped: API fetch failed (tunnel is healthy — transient, will retry next cycle)"
+            else
+                log "WARNING: API fetch failed AND tunnel looks unhealthy — cannot pick a new server without the API; check GL panel"
+            fi
+            exit 0
+        fi
+        mv "$RECO.new" "$RECO"
+        probe_latency
+    fi
 
-    # walk the best-first list once: the CURRENT server is matched anywhere in
-    # the fetched pool, but switch targets come only from the top $CANDIDATES
-    CUR_LOAD=""; CUR_HOST=""; CUR_RANK=""
-    BEST_HOST=""; BEST_LOAD=""; BEST_STATION=""; BEST_PUB=""; BEST_LOC=""
+    # pass 1 — walk the whole fetched pool once: collect (load, api-index,
+    # station, host) and match the CURRENT server anywhere in the pool
+    RANKF="$STATE_DIR/rank.$$"
+    : > "$RANKF"
+    CUR_LOAD=""; CUR_HOST=""; CUR_RANK=""; CUR_IDX=""
     i=0; found=0
     while :; do
         host=$(jf "@[$i].hostname")
@@ -235,23 +249,42 @@ cmd_run() {
         found=$((found + 1))
         load=$(jf "@[$i].load")
         station=$(jf "@[$i].station")
-        is_uint "$load" || { i=$((i + 1)); continue; }
         if [ "$station" = "$CUR_IP" ] || [ "$host" = "$CFG_HOST" ]; then
-            CUR_LOAD="$load"; CUR_HOST="$host"; CUR_RANK="$((i + 1))"
-        elif [ -z "$BEST_HOST" ] && [ "$i" -lt "$CANDIDATES" ]; then
-            # accept a candidate only when its station AND public key parse —
-            # never switch onto half-parsed data
-            pub=$(jf "@[$i].technologies[@.identifier=\"wireguard_udp\"].metadata[@.name=\"public_key\"].value")
-            if [ -n "$station" ] && [ -n "$pub" ]; then
-                BEST_HOST="$host"; BEST_LOAD="$load"; BEST_STATION="$station"; BEST_PUB="$pub"
-                cc=$(jf "@[$i].locations[0].country.name")
-                city=$(jf "@[$i].locations[0].country.city.name")
-                [ -n "$cc" ] && [ -n "$city" ] && BEST_LOC="$cc,$city"
-            fi
+            CUR_HOST="$host"; CUR_IDX="$i"
+            is_uint "$load" && CUR_LOAD="$load"
+        fi
+        if is_uint "$load" && [ -n "$station" ]; then
+            printf '%s %s %s %s\n' "$load" "$i" "$station" "$host" >> "$RANKF"
         fi
         i=$((i + 1))
     done
-    [ "$found" -gt 0 ] || die "API response parsed to zero servers — response format may have changed, not touching anything"
+    [ "$found" -gt 0 ] || { rm -f "$RANKF"; die "API response parsed to zero servers — response format may have changed, not touching anything"; }
+
+    # order by load, ties keep NordVPN's order — the dashboard sorts the same
+    # way, so the engine's pick is always one of the rows the user is looking at
+    sort -n -k1,1 -k2,2 "$RANKF" > "$RANKF.sorted"
+    if [ -n "$CUR_IDX" ]; then
+        CUR_RANK=$(awk -v idx="$CUR_IDX" '$2 == idx { print NR; exit }' "$RANKF.sorted")
+    fi
+
+    # pass 2 — pick the lowest-load candidate within the top $CANDIDATES,
+    # skipping the current server; accept one only when its public key parses
+    # too — never switch onto half-parsed data
+    BEST_HOST=""; BEST_LOAD=""; BEST_STATION=""; BEST_PUB=""; BEST_LOC=""
+    r=0
+    while read -r load idx station host; do
+        r=$((r + 1))
+        [ "$r" -le "$CANDIDATES" ] || break
+        [ "$idx" = "$CUR_IDX" ] && continue
+        pub=$(jf "@[$idx].technologies[@.identifier=\"wireguard_udp\"].metadata[@.name=\"public_key\"].value")
+        [ -n "$pub" ] || continue
+        BEST_HOST="$host"; BEST_LOAD="$load"; BEST_STATION="$station"; BEST_PUB="$pub"
+        cc=$(jf "@[$idx].locations[0].country.name")
+        city=$(jf "@[$idx].locations[0].country.city.name")
+        [ -n "$cc" ] && [ -n "$city" ] && BEST_LOC="$cc,$city"
+        break
+    done < "$RANKF.sorted"
+    rm -f "$RANKF" "$RANKF.sorted"
 
     # decide ($FORCE_REASON set = force/nightly: switch regardless of load/dwell)
     reason=""

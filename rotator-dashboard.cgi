@@ -71,8 +71,11 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
     IFS=$OLDIFS
     case "$action" in
     force)
+        # t (captured before spawning) lets the result page poll until the
+        # forced run has actually reported back
+        t=$(date +%s)
         "$ROTATE_BIN" force >/dev/null 2>&1 &
-        redirect "/cgi-bin/rotator?msg=forced" ;;
+        redirect "/cgi-bin/rotator?msg=forced&t=$t" ;;
     save)
         # values arrive urlencoded, but digits never need encoding — the
         # numeric whitelist below doubles as decoding safety
@@ -99,9 +102,11 @@ if [ "$REQUEST_METHOD" = "POST" ]; then
         setconf CANDIDATES "$cand"
         if [ "$mode" = "dry" ]; then setconf DRY_RUN 1; else setconf DRY_RUN 0; fi
         # apply immediately: re-fetch the candidate list with the new settings
-        # in the background — the page shows fresh data on its next refresh
+        # in the background; t lets the result page poll until the fresh list
+        # has landed
+        t=$(date +%s)
         "$ROTATE_BIN" refresh >/dev/null 2>&1 &
-        redirect "/cgi-bin/rotator?msg=saved" ;;
+        redirect "/cgi-bin/rotator?msg=saved&t=$t" ;;
     *) fail "400 Bad Request" "unknown action" ;;
     esac
 fi
@@ -139,11 +144,12 @@ if [ -n "$HS_AGE" ]; then
 fi
 
 # --- candidate board ----------------------------------------------------------
-# The rotate script fetches a pool of at least 20 servers; only the top
-# $CANDIDATES rows are switch targets and get displayed. The CURRENT server is
-# matched anywhere in the pool — when it sits below the display cutoff its row
-# is appended (real rank kept) so it never vanishes from the board.
-CUR_HOST=""; CUR_LOAD=""; CUR_RANK=""; CUR_CITY=""; CUR_RTT=""
+# The fetched pool (>= 20 servers) is sorted by load — lowest first, ties keep
+# NordVPN's order — exactly how the rotate script sorts before picking, so the
+# first non-current row IS what a force switch takes. Only the top $CANDIDATES
+# rows are switch targets; a current server ranked below them is appended with
+# its real rank so it never vanishes from the board.
+CUR_HOST=""; CUR_LOAD=""; CUR_RANK=""; CUR_CITY=""; CUR_RTT=""; CUR_IDX=""
 BEST_HOST=""; BEST_LOAD=""
 FOUND=0; ROWS=""; CUR_ROW=""; FETCHED=""; FETCH_AGE=""; COUNTRY_NAME=""
 if [ -f "$RECO" ]; then
@@ -151,39 +157,49 @@ if [ -f "$RECO" ]; then
     ft=$(date -r "$RECO" +%s 2>/dev/null)
     is_uint "$ft" && FETCH_AGE=$(( (NOW - ft) / 60 ))
     COUNTRY_NAME=$(jf '@[0].locations[0].country.name')
+    RANKF="/tmp/rotator-rank.$$"
+    : > "$RANKF"
     i=0
     while :; do
         host=$(jf "@[$i].hostname"); [ -n "$host" ] || break
         FOUND=$((i + 1))
-        is_cur=0
         load=$(jf "@[$i].load"); station=$(jf "@[$i].station")
-        if [ "$station" = "$CUR_IP" ] || [ "$host" = "$CFG_HOST" ]; then is_cur=1; fi
+        if [ "$station" = "$CUR_IP" ] || [ "$host" = "$CFG_HOST" ]; then CUR_IDX="$i"; fi
+        if is_uint "$load" && [ -n "$station" ]; then
+            printf '%s %s %s %s\n' "$load" "$i" "$station" "$host" >> "$RANKF"
+        fi
+        i=$((i + 1))
+    done
+    sort -n -k1,1 -k2,2 "$RANKF" > "$RANKF.s"
+    r=0
+    while read -r load idx station host; do
+        r=$((r + 1))
+        is_cur=0
+        [ -n "$CUR_IDX" ] && [ "$idx" = "$CUR_IDX" ] && is_cur=1
         # below the display cutoff only the current server's row is built
-        if [ "$i" -ge "$CANDIDATES" ] && [ "$is_cur" != "1" ]; then i=$((i + 1)); continue; fi
-        city=$(jf "@[$i].locations[0].country.city.name")
-        is_uint "$load" || load=""
-        rtt=""
-        [ -n "$station" ] && rtt=$(rtt_of "$station")
+        if [ "$r" -gt "$CANDIDATES" ] && [ "$is_cur" != "1" ]; then continue; fi
+        city=$(jf "@[$idx].locations[0].country.city.name")
+        rtt=$(rtt_of "$station")
         [ -n "$rtt" ] && rtt_txt="$rtt ms" || rtt_txt="&#8211;"
         cls=""; chip=""
         if [ "$is_cur" = "1" ]; then
-            CUR_HOST="$host"; CUR_LOAD="$load"; CUR_RANK=$((i + 1))
+            CUR_HOST="$host"; CUR_LOAD="$load"; CUR_RANK="$r"
             CUR_CITY="$city"; CUR_RTT="$rtt"
             cls=" class=\"cur\""; chip="<span class=\"chip me\">&#9664; current</span>"
-            [ "$i" -ge "$CANDIDATES" ] && cls=" class=\"cur below\""
-        elif [ -z "$BEST_HOST" ] && [ -n "$load" ] && [ -n "$station" ]; then
+            [ "$r" -gt "$CANDIDATES" ] && cls=" class=\"cur below\""
+        elif [ -z "$BEST_HOST" ]; then
             BEST_HOST="$host"; BEST_LOAD="$load"
             chip="%%BESTCHIP%%"
         fi
-        [ -n "$load" ] && [ "$load" -ge "$LOAD_THRESHOLD" ] && barcls="hot" || barcls="cool"
-        row="<tr$cls><td class=\"rk\">$((i + 1))</td><td class=\"sv\">$(printf '%s' "$host" | esc)<span class=\"st\">$(printf '%s' "$station" | esc)</span></td><td class=\"ct\">$(printf '%s' "$city" | esc)</td><td class=\"ld\"><div class=\"bar\"><i class=\"$barcls\" style=\"width:${load:-0}%\"></i></div><span class=\"n $barcls\">${load:-?}%</span></td><td class=\"rt\">$rtt_txt</td><td class=\"vc\">$chip</td></tr>"
-        if [ "$is_cur" = "1" ] && [ "$i" -ge "$CANDIDATES" ]; then
+        [ "$load" -ge "$LOAD_THRESHOLD" ] && barcls="hot" || barcls="cool"
+        row="<tr$cls><td class=\"rk\">$r</td><td class=\"sv\">$(printf '%s' "$host" | esc)<span class=\"st\">$(printf '%s' "$station" | esc)</span></td><td class=\"ct\">$(printf '%s' "$city" | esc)</td><td class=\"ld\"><div class=\"bar\"><i class=\"$barcls\" style=\"width:${load}%\"></i></div><span class=\"n $barcls\">${load}%</span></td><td class=\"rt\">$rtt_txt</td><td class=\"vc\">$chip</td></tr>"
+        if [ "$is_cur" = "1" ] && [ "$r" -gt "$CANDIDATES" ]; then
             CUR_ROW="<tr class=\"gaprow\"><td colspan=\"6\">&#8942; not a switch target &mdash; ranked below the top $CANDIDATES</td></tr>$row"
         else
             ROWS="$ROWS$row"
         fi
-        i=$((i + 1))
-    done
+    done < "$RANKF.s"
+    rm -f "$RANKF" "$RANKF.s"
     ROWS="$ROWS$CUR_ROW"
 fi
 
@@ -269,10 +285,40 @@ else
     VPN_BADGE='<span class="badge down">vpn down</span>'
 fi
 
-MSG=""
+# --- save/force feedback ------------------------------------------------------
+# The redirect carries t (the click time). While the background work has not
+# finished, the page shows an animated "applying" banner and re-polls itself
+# every 3 s; once the signal lands it renders the final state. Signals:
+#   saved  -> reco.json mtime >= t  (refresh writes it when done)
+#   forced -> log mtime >= t AND the run lock is gone (the run logs early,
+#             so mtime alone would declare victory mid-switch)
+QT=""
+case "$QUERY_STRING" in *t=*) QT="${QUERY_STRING##*t=}"; QT="${QT%%&*}" ;; esac
+is_uint "$QT" || QT=""
+MSG_HTML=""; META_POLL=""; BOARD_CLS=""
+SPIN='<span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>'
 case "$QUERY_STRING" in
-    *msg=forced*) MSG="Forced switch triggered &mdash; the decision appears in the switch history below (page auto-refreshes)." ;;
-    *msg=saved*)  MSG="Settings saved &mdash; the candidate list is re-fetching with the new values right now." ;;
+*msg=forced*)
+    LT=$(date -r "$LOG_FILE" +%s 2>/dev/null); is_uint "$LT" || LT=0
+    if [ -z "$QT" ] || { [ "$LT" -ge "$QT" ] && [ ! -d "$STATE_DIR/lock" ]; }; then
+        MSG_HTML='<div class="msg">Forced switch finished &mdash; the result is in the switch history below.</div>'
+    elif [ $((NOW - QT)) -le 90 ]; then
+        MSG_HTML="<div class=\"msg applying\">$SPIN<span>Switching servers &mdash; the internet may blip for ~15 s. This page keeps checking&hellip;</span></div>"
+        META_POLL='<meta http-equiv="refresh" content="3">'
+    else
+        MSG_HTML='<div class="warnbox">The forced switch has not reported back after 90 s &mdash; check &ldquo;Recent activity&rdquo; below.</div>'
+    fi ;;
+*msg=saved*)
+    RT=$(date -r "$RECO" +%s 2>/dev/null); is_uint "$RT" || RT=0
+    if [ -z "$QT" ] || [ "$RT" -ge "$QT" ]; then
+        MSG_HTML='<div class="msg">Settings applied &mdash; the candidate board below reflects the new values.</div>'
+    elif [ $((NOW - QT)) -le 45 ]; then
+        MSG_HTML="<div class=\"msg applying\">$SPIN<span>Applying new settings &mdash; fetching the candidate list&hellip;</span></div>"
+        META_POLL='<meta http-equiv="refresh" content="3">'
+        BOARD_CLS=" stale-dim"
+    else
+        MSG_HTML='<div class="warnbox">Settings saved, but the candidate refresh has not finished after 45 s &mdash; check &ldquo;Recent activity&rdquo; below.</div>'
+    fi ;;
 esac
 
 NIGHTLY_CHECKED=""
@@ -323,6 +369,7 @@ cat <<HTML
 <!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <noscript><meta http-equiv="refresh" content="60"></noscript>
+$META_POLL
 <title>NordVPN rotator</title>
 <script>
 (function(){var t=null;try{t=localStorage.getItem('nvrTheme')}catch(e){}
@@ -363,6 +410,15 @@ body{margin:0;padding:16px 14px 40px;background:var(--bg);color:var(--ink);
 .badge.down{background:var(--dbg);color:var(--dtx)}
 .msg{background:var(--teal);color:#073226;padding:8px 14px;border-radius:8px}
 .warnbox{background:var(--dbg);color:var(--dtx);padding:8px 14px;border-radius:8px}
+.msg.applying{display:flex;align-items:center;gap:10px}
+.dots{display:inline-flex;gap:4px;flex:none}
+.dots i{width:6px;height:6px;border-radius:50%;background:#073226;opacity:.25;
+ animation:nvrdot 1.2s infinite}
+.dots i:nth-child(2){animation-delay:.2s}
+.dots i:nth-child(3){animation-delay:.4s}
+@keyframes nvrdot{0%,60%,100%{opacity:.25}30%{opacity:1}}
+.stale-dim{opacity:.55;transition:opacity .3s}
+@media (prefers-reduced-motion:reduce){.dots i{animation:none;opacity:.7}}
 h1{font:600 26px/1.2 var(--mono);margin:2px 0 6px;word-break:break-all}
 .sub{color:var(--mut);font-size:15px}
 .facts{color:var(--dim);font-size:12.5px;margin-top:10px;font-family:var(--mono)}
@@ -475,7 +531,7 @@ button:focus-visible,input:focus-visible,summary:focus-visible,a:focus-visible{
 <span class="brand">Nord<b>VPN</b> rotator${COUNTRY_ESC:+ &middot; <span class=note>$COUNTRY_ESC</span>}</span>
 <span class="badges">$BADGE $VPN_BADGE <button type="button" id="themebtn" class="theme" onclick="themeFlip()" aria-label="toggle light/dark theme">&#9790;</button></span>
 </div>
-${MSG:+<div class="msg">$MSG</div>}
+$MSG_HTML
 $([ "$VPN_UP" = "yes" ] || echo '<div class="warnbox">VPN interface is DOWN or off &mdash; the rotator leaves it alone while off.</div>')
 <div class="panel">
 <p class="eyebrow">current server</p>
@@ -495,8 +551,8 @@ $GAUGE
 </form>
 </div>
 </div>
-<div class="panel">
-<p class="eyebrow">candidates &middot; ranked by NordVPN$FRESH_NOTE</p>
+<div class="panel$BOARD_CLS">
+<p class="eyebrow">candidates &middot; sorted by load, best first$FRESH_NOTE</p>
 $(if [ -n "$ROWS" ]; then cat <<BOARD
 <div class="board" style="--th:${LOAD_THRESHOLD}%">
 <table>
@@ -504,7 +560,7 @@ $(if [ -n "$ROWS" ]; then cat <<BOARD
 $ROWS
 </table>
 </div>
-<p class="tblnote">load from NordVPN's API &middot; rtt pinged from the router each cycle (current server direct, others through the tunnel) &middot; the tick on each bar is the ${LOAD_THRESHOLD}% switch line</p>
+<p class="tblnote">NordVPN's recommendation pool sorted by load, ties keep NordVPN's order &mdash; a force switch takes the top non-current row &middot; rtt pinged from the router each cycle (current server direct, others through the tunnel) &middot; the tick on each bar is the ${LOAD_THRESHOLD}% switch line</p>
 BOARD
 else
     echo '<p class="empty">no candidate data yet &mdash; the rotator has not run since the last reboot.</p>'
