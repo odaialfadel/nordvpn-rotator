@@ -37,6 +37,15 @@ it onto a router without a scp dance, and proving it lands correctly.
   pins `eol=lf` for every text file, and CI fails on a stray CR.
   Existing Windows clones need one `git rm --cached -r . && git reset --hard`
   to pick the new checkout rules up.
+- **The Force button on the dashboard did nothing on a Linux checkout.** The
+  CGI runs `"$ROTATE_BIN" force` directly, but `nordvpn-rotate.sh` was
+  committed 0644, so the exec failed — silently, because the CGI backgrounds
+  the call. Routers were never affected (the `.ipk` and `install.sh` both set
+  0755 on install), and Windows hid it because NTFS reports every file as
+  executable. All shell entry points are now 0755 in git.
+- **The test mocks were committed without the executable bit.** They are
+  resolved through `PATH`, so on Linux every check failed at once with no clue
+  why; `run-local.sh` now checks for it up front and says so.
 - **`test/run-local.sh` could not run on Linux or in CI.** It called `python`,
   which Ubuntu does not ship — only `python3`. It now probes for a working
   Python 3 by output rather than exit status, because Windows ships a `python3`
